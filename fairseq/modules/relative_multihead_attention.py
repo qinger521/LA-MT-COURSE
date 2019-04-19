@@ -182,7 +182,7 @@ class RelativeMultiheadAttention(nn.Module):
             attn_mask = attn_mask.unsqueeze(0)
             if self.onnx_trace:
                 attn_mask = attn_mask.repeat(relative_attn_weights.size(0), 1, 1)
-                relative_attn_weights += attn_mask
+            relative_attn_weights += attn_mask
 
         if key_padding_mask is not None:
             # don't attend to padding symbols
