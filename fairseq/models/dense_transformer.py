@@ -15,6 +15,7 @@ from fairseq import options, utils
 from fairseq.modules import (
     AdaptiveInput, AdaptiveSoftmax, CharacterTokenEmbedder, LayerNorm,
     LearnedPositionalEmbedding, MultiheadAttention, SinusoidalPositionalEmbedding,
+    RelativeMultiheadAttention,
 )
 
 from . import (
@@ -95,6 +96,8 @@ class DenseTransformerModel(FairseqModel):
                                  'Must be used with adaptive_loss criterion'),
         parser.add_argument('--adaptive-softmax-dropout', type=float, metavar='D',
                             help='sets adaptive softmax dropout for the tail projections')
+        parser.add_argument('--max-relative-length', type=int, default=-1,
+                            help='the max relative length')
         # fmt: on
 
         ### dense layer parameters
@@ -514,10 +517,16 @@ class TransformerEncoderLayer(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.embed_dim = args.encoder_embed_dim
-        self.self_attn = MultiheadAttention(
-            self.embed_dim, args.encoder_attention_heads,
-            dropout=args.attention_dropout,
-        )
+        if args.max_relative_length==-1:
+            self.self_attn = MultiheadAttention(
+                self.embed_dim, args.encoder_attention_heads,
+                dropout=args.attention_dropout,
+            )
+        else:
+            self.self_attn = RelativeMultiheadAttention(
+                self.embed_dim, args.encoder_attention_heads,
+                args.max_relative_length, dropout=args.attention_dropout,
+            )
         self.dropout = args.dropout
         self.relu_dropout = args.relu_dropout
         self.normalize_before = args.encoder_normalize_before
@@ -580,10 +589,16 @@ class TransformerDecoderLayer(nn.Module):
     def __init__(self, args, no_encoder_attn=False):
         super().__init__()
         self.embed_dim = args.decoder_embed_dim
-        self.self_attn = MultiheadAttention(
-            self.embed_dim, args.decoder_attention_heads,
-            dropout=args.attention_dropout,
-        )
+        if args.max_relative_length == -1:
+            self.self_attn = MultiheadAttention(
+                self.embed_dim, args.decoder_attention_heads,
+                dropout=args.attention_dropout,
+            )
+        else:
+            self.self_attn = RelativeMultiheadAttention(
+                self.embed_dim, args.decoder_attention_heads,
+                args.max_relative_length, dropout=args.attention_dropout,
+            )
         self.dropout = args.dropout
         self.relu_dropout = args.relu_dropout
         self.normalize_before = args.decoder_normalize_before
@@ -751,6 +766,7 @@ def base_architecture(args):
     args.decoder_history_type = getattr(args, 'decoder_history_type', 'dense')
     args.encoder_integration_type = getattr(args, 'encoder_integration_type', 'avg')
     args.decoder_integration_type = getattr(args, 'decoder_integration_type', 'avg')
+    args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
 
 
 
@@ -773,4 +789,20 @@ def dense_transformer_t2t_wmt_en_de(args):
     args.decoder_history_type = getattr(args, 'decoder_history_type', 'learnable_dense')
     args.encoder_layers = 25
     base_architecture(args)
+
+
+
+@register_model_architecture('dense_transformer', 'dense_relative_transformer_wmt_en_de')
+def dense_relative_transformer_wmt_en_de(args):
+    args.max_relative_length = 20
+    args.encoder_layers = 6
+    dense_transformer_wmt_en_de(args)
+
+
+
+@register_model_architecture('dense_transformer', 'dense_relative_transformer_t2t_wmt_en_de')
+def dense_relative_transformer_t2t_wmt_en_de(args):
+    args.max_relative_length = 20
+    args.encoder_layers = 6
+    dense_transformer_t2t_wmt_en_de(args)
 
