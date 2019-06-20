@@ -19,13 +19,14 @@ class RelativeMultiheadAttention(nn.Module):
     See "Self-Attention with Relative Position Representations" for more details.
     """
 
-    def __init__(self, embed_dim, num_heads, max_relative_length, dropout=0., bias=True, add_bias_kv=False, add_zero_attn=False):
+    def __init__(self, embed_dim, num_heads, max_relative_length, dropout=0., bias=True, add_bias_kv=False, add_zero_attn=False, k_only=False):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.max_relative_length = max_relative_length
         self.dropout = dropout
         self.head_dim = embed_dim // num_heads
+        self.k_only = k_only
         assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
         self.scaling = self.head_dim ** -0.5
 
@@ -44,10 +45,9 @@ class RelativeMultiheadAttention(nn.Module):
 
         self.add_zero_attn = add_zero_attn
 
-        # self.relative_position_keys = nn.Embedding(2 * self.max_relative_length + 1, self.head_dim)
-        # self.relative_position_values = nn.Embedding(2 * self.max_relative_length + 1, self.head_dim)
         self.relative_position_keys = Parameter(torch.Tensor(2 * self.max_relative_length + 1, self.head_dim))
-        self.relative_position_values = Parameter(torch.Tensor(2 * self.max_relative_length + 1, self.head_dim))
+        if not self.k_only:
+            self.relative_position_values = Parameter(torch.Tensor(2 * self.max_relative_length + 1, self.head_dim))
 
         self.reset_parameters()
 
@@ -66,8 +66,9 @@ class RelativeMultiheadAttention(nn.Module):
             nn.init.xavier_normal_(self.bias_k)
         if self.bias_v is not None:
             nn.init.xavier_normal_(self.bias_v)
-        nn.init.xavier_normal_(self.relative_position_keys)
-        nn.init.xavier_normal_(self.relative_position_values)
+        nn.init.xavier_uniform_(self.relative_position_keys)
+        if not self.k_only:
+            nn.init.xavier_uniform_(self.relative_position_values)
 
     def forward(self, query, key, value, key_padding_mask=None, incremental_state=None,
                 need_weights=True, static_kv=False, attn_mask=None):
@@ -170,11 +171,13 @@ class RelativeMultiheadAttention(nn.Module):
         relative_positions_matrix = self._generate_relative_positions_matrix(
             src_len, self.max_relative_length, incremental_state
         )
-        # print("relative_positions_matrix : {}".format(relative_positions_matrix))
-        # relation_keys = self.relative_position_keys(relative_positions_matrix.long().cuda())
-        # relation_values = self.relative_position_values(relative_positions_matrix.long().cuda())
-        relation_keys = F.embedding(relative_positions_matrix.long().cuda(), self.relative_position_keys)
-        relation_values = F.embedding(relative_positions_matrix.long().cuda(), self.relative_position_values)
+
+        if self.k_only:
+            relation_keys = F.embedding(relative_positions_matrix.long().cuda(), self.relative_position_keys)
+        else:
+            relation_keys = F.embedding(relative_positions_matrix.long().cuda(), self.relative_position_keys)
+            relation_values = F.embedding(relative_positions_matrix.long().cuda(), self.relative_position_values)
+
         relative_attn_weights = self._relative_attention_inner(q, k, relation_keys, transpose=True)
         assert list(relative_attn_weights.size()) == [bsz * self.num_heads, tgt_len, src_len]
 
@@ -204,8 +207,14 @@ class RelativeMultiheadAttention(nn.Module):
             relative_attn_weights, dim=-1, onnx_trace=self.onnx_trace,
         ).type_as(relative_attn_weights)
         relative_attn_weights = F.dropout(relative_attn_weights, p=self.dropout, training=self.training)
+        # key only mode
+        if self.k_only:
+            attn = torch.bmm(relative_attn_weights, v)
+        # original implementation
+        else:
+            attn = self._relative_attention_inner(relative_attn_weights, v, relation_values, transpose=False)
 
-        attn = self._relative_attention_inner(relative_attn_weights, v, relation_values, transpose=False)
+        #attn = torch.bmm(relative_attn_weights, v)
         assert list(attn.size()) == [bsz * self.num_heads, tgt_len, self.head_dim]
         if (self.onnx_trace and attn.size(1) == 1):
             # when ONNX tracing a single decoder step (sequence length == 1)
@@ -318,5 +327,6 @@ class RelativeMultiheadAttention(nn.Module):
             z = z.transpose(1, 2)
         x_tz_matmul = torch.bmm(x_t, z).transpose(0, 1).view(batch_size_mul_head, length, -1)
 
-        # assert xy_matmul.size() == x_tz_matmul.size()
-        return xy_matmul + x_tz_matmul
+        attn = xy_matmul + x_tz_matmul
+
+        return attn
