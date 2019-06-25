@@ -97,6 +97,8 @@ class TransformerModel(FairseqModel):
                             help='sets adaptive softmax dropout for the tail projections')
         parser.add_argument('--max-relative-length', type=int, default=-1,
                             help='the max relative length')
+        parser.add_argument('--only-k', type=bool, default=False,
+                            help='select the relative mode to map relative position information')
         # fmt: on
 
     @classmethod
@@ -590,7 +592,7 @@ class TransformerEncoderLayer(nn.Module):
         else:
             self.self_attn = RelativeMultiheadAttention(
                 self.embed_dim, args.encoder_attention_heads,
-                args.max_relative_length, dropout=args.attention_dropout,
+                args.max_relative_length, dropout=args.attention_dropout, k_only=args.k_only,
             )
 
         self.dropout = args.dropout
@@ -663,7 +665,7 @@ class TransformerDecoderLayer(nn.Module):
         else:
             self.self_attn = RelativeMultiheadAttention(
                 self.embed_dim, args.decoder_attention_heads,
-                args.max_relative_length, dropout=args.attention_dropout,
+                args.max_relative_length, dropout=args.attention_dropout, k_only=args.k_only,
             )
 
         self.dropout = args.dropout
@@ -887,6 +889,7 @@ def base_architecture(args):
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
     args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
+    args.k_only = getattr(args, 'k_only', args.k_only)
 
 @register_model_architecture('transformer', 'transformer_iwslt_de_en')
 def transformer_iwslt_de_en(args):
@@ -917,7 +920,8 @@ def transformer_t2t_wmt_en_de(args):
 
 @register_model_architecture('transformer', 'relative_transformer_wmt_en_de')
 def relative_transformer_wmt_en_de(args):
-    args.max_relative_length = 20
+    args.max_relative_length = 8
+    args.k_only = True
     base_architecture(args)
 
 
@@ -927,7 +931,9 @@ def relative_transformer_t2t_wmt_en_de(args):
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.max_relative_length = 20
+    args.encoder_layers = 40
+    args.max_relative_length = 8
+    args.k_only = True
     base_architecture(args)
 
 
