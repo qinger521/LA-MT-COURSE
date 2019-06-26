@@ -19,7 +19,7 @@ class RelativeMultiheadAttention(nn.Module):
     See "Self-Attention with Relative Position Representations" for more details.
     """
 
-    def __init__(self, embed_dim, num_heads, max_relative_length, dropout=0., bias=True, add_bias_kv=False, add_zero_attn=False, k_only=False):
+    def __init__(self, embed_dim, num_heads, max_relative_length, dropout=0., bias=True, add_bias_kv=False, add_zero_attn=False, k_only=True):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
