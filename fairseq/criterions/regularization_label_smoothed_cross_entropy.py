@@ -52,6 +52,6 @@ class RegularizationCrossEntropyCriterion(label_smoothed_cross_entropy.LabelSmoo
             smooth_loss = smooth_loss.sum()
         eps_i = self.eps / lprobs.size(-1)
         loss = (1. - self.eps) * nll_loss + eps_i * smooth_loss
-        reg = net_output[1]['reg']
+        reg = net_output[1]['reg'].type_as(loss)
         loss = loss + reg
         return loss, nll_loss
