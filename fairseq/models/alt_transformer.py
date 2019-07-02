@@ -141,7 +141,7 @@ class AltTransformerModel(FairseqModel):
             args.share_decoder_input_output_embed = True
         else:
             encoder_embed_tokens = build_embedding(
-                src_dict, args.encoder_embed_dim, args.encoder_embed_path
+                src_dict, args.wide_encoder_embed_dim, args.encoder_embed_path
             )
             decoder_embed_tokens = build_embedding(
                 tgt_dict, args.decoder_embed_dim, args.decoder_embed_path
@@ -183,7 +183,8 @@ class TransformerEncoder(FairseqEncoder):
         ) if not args.no_token_positional_embeddings else None
 
         self.layers = nn.ModuleList([])
-        self.layers.extend([
+        self.wide_layers = nn.ModuleList([])
+        self.wide_layers.extend([
             WideTransformerEncoderLayer(args)
             for i in range(args.wide_encoder_layers)
         ])
@@ -194,7 +195,8 @@ class TransformerEncoder(FairseqEncoder):
         self.register_buffer('version', torch.Tensor([2]))
         self.normalize = args.encoder_normalize_before
         if self.normalize:
-            self.layer_norm = LayerNorm(embed_dim)
+            self.layer_norm = LayerNorm(int(embed_dim/2))
+        self.transfer = Linear(embed_dim, int(embed_dim/2))
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -226,6 +228,9 @@ class TransformerEncoder(FairseqEncoder):
             encoder_padding_mask = None
 
         # encoder layers
+        for layer in self.wide_layers:
+            x = layer(x, encoder_padding_mask)
+        x = self.transfer(x)
         for layer in self.layers:
             x = layer(x, encoder_padding_mask)
 
@@ -571,7 +576,7 @@ class WideTransformerEncoderLayer(nn.Module):
         self.fc1 = Linear(self.embed_dim, args.wide_encoder_ffn_embed_dim)
         self.fc2 = Linear(args.wide_encoder_ffn_embed_dim, self.embed_dim)
         self.layer_norms = nn.ModuleList([LayerNorm(self.embed_dim) for i in range(2)])
-        self.transfer = Linear(self.embed_dim, self.embed_dim/2)
+        #self.transfer = Linear(self.embed_dim, int(self.embed_dim/2))
 
     def forward(self, x, encoder_padding_mask):
         """
@@ -598,7 +603,7 @@ class WideTransformerEncoderLayer(nn.Module):
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
         x = self.maybe_layer_norm(1, x, after=True)
-        x = self.transfer(x)
+        #x = self.transfer(x)
         return x
 
     def maybe_layer_norm(self, i, x, before=False, after=False):
@@ -815,7 +820,17 @@ def base_architecture(args):
 
 @register_model_architecture('alt_transformer', 'alt_transformer_wmt_en_de')
 def alt_transformer_wmt_en_de(args):
+    args.encoder_layers = 6
+    args.encoder_wide_layers = 3
+    base_architecture(args)
+
+
+@register_model_architecture('alt_transformer', 'alt_transformer_t2t_wmt_en_de')
+def alt_transformer_t2t_wmt_en_de(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
     args.encoder_layers = 5
     args.encoder_wide_layers = 1
-
     base_architecture(args)
