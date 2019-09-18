@@ -302,7 +302,7 @@ class RelativeMultiheadAttention(nn.Module):
 
         Args:
           x: Tensor with shape [batch_size*heads, length, length or depth].
-          y: Tensor with shape [batch_size*heads, length, depth].
+          y: Tensor with shap e [batch_size*heads, length, depth].
           z: Tensor with shape [length, length, depth].
           transpose: Whether to tranpose inner matrices of y and z. Should be true if
               last dimension of x is depth, not length.
