@@ -238,11 +238,10 @@ class TransformerEncoder(FairseqEncoder):
                 cosin = cos(inner_states[layer_i], inner_states[layer_j])
                 reg += cosin
 
-        reg = torch.mean(reg)
         return {
             'encoder_out': x,  # T x B x C
             'encoder_padding_mask': encoder_padding_mask,  # B x T
-            'reg':reg,
+            'reg':reg[encoder_padding_mask],
         }
 
     def reorder_encoder_out(self, encoder_out, new_order):
@@ -398,6 +397,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         attn = None
 
         inner_states = []
+
 
         # decoder layers
         for layer in self.layers:

@@ -47,11 +47,11 @@ class RegularizationCrossEntropyCriterion(label_smoothed_cross_entropy.LabelSmoo
         non_pad_mask = target.ne(self.padding_idx)
         nll_loss = -lprobs.gather(dim=-1, index=target)[non_pad_mask]
         smooth_loss = -lprobs.sum(dim=-1, keepdim=True)[non_pad_mask]
+        reg_loss = net_output[1]['reg'].type_as(nll_loss)
         if reduce:
             nll_loss = nll_loss.sum()
             smooth_loss = smooth_loss.sum()
         eps_i = self.eps / lprobs.size(-1)
         loss = (1. - self.eps) * nll_loss + eps_i * smooth_loss
-        reg = net_output[1]['reg'].type_as(loss)
-        loss = loss + reg
+        loss = loss + reg_loss
         return loss, nll_loss
