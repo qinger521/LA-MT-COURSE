@@ -22,7 +22,7 @@ from . import (
     FairseqIncrementalDecoder, FairseqEncoder, FairseqLanguageModel,
     FairseqModel, register_model, register_model_architecture,
 )
-from fairseq.modules.layer_history import CreateLayerHistory
+from fairseq.modules.efficient_block import CreateEfficientBlock
 
 
 @register_model('Block_transformer')
@@ -192,7 +192,9 @@ class BlockTransformerEncoder(FairseqEncoder):
         ) if not args.no_token_positional_embeddings else None
 
         # create encoder layer history
-        self.history = CreateLayerHistory(args, is_encoder=True)
+        self.in_block_num = args.in_block_num
+        self.inner_block = CreateEfficientBlock(args, is_encoder=True)
+        self.outer_block = CreateEfficientBlock(args, is_encoder=True)
         self.layers = nn.ModuleList([])
         self.layers.extend([
             TransformerEncoderLayer(args)
@@ -202,6 +204,7 @@ class BlockTransformerEncoder(FairseqEncoder):
         self.normalize = args.encoder_normalize_before
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
+
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -218,8 +221,8 @@ class BlockTransformerEncoder(FairseqEncoder):
                 - **encoder_padding_mask** (ByteTensor): the positions of
                   padding elements of shape `(batch, src_len)`
         """
-        if self.history is not None:
-            self.history.clean()
+        if self.inner_block is not None:
+            self.inner_block.clean()
         # embed tokens and positions
         x = self.embed_scale * self.embed_tokens(src_tokens)
         if self.embed_positions is not None:
@@ -230,8 +233,9 @@ class BlockTransformerEncoder(FairseqEncoder):
         x = x.transpose(0, 1)
 
         # add emb into history
-        if self.history is not None:
-            self.history.add(x)
+        if self.inner_block is not None:
+            self.inner_block.add(x)
+            self.outer_block.add(x)
 
         # compute padding mask
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
@@ -239,12 +243,15 @@ class BlockTransformerEncoder(FairseqEncoder):
             encoder_padding_mask = None
 
         # encoder layers
-        for layer in self.layers:
-            if self.history is not None:
-                x = self.history.pop()
+        for layer_id, layer in enumerate(self.layers):
+            if self.inner_block is not None:
+                x = self.inner_block.pop()
             x = layer(x, encoder_padding_mask)
-            if self.history is not None:
-                self.history.add(x)
+            if self.inner_block is not None:
+                self.inner_block.add(x)
+            if (layer_id + 1) % self.in_block_num == 0 :
+                self.outer_block.add(self.inner_block.pop())
+                self.inner_block.reset(self.outer_block.pop())
 
         if self.history is not None:
             x = self.history.pop()
@@ -768,6 +775,8 @@ def base_architecture(args):
     args.decoder_integration_type = getattr(args, 'decoder_integration_type', 'avg')
     args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
 
+    # set for block
+    args.in_block_num = getattr(args, 'in_block_num', args.in_block_num)
 
 
 @register_model_architecture('block_transformer', 'block_transformer_wmt_en_de')

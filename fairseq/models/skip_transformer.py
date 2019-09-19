@@ -756,6 +756,8 @@ def base_architecture(args):
     args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
     args.k_only = getattr(args, 'k_only', args.k_only)
     args.layer_p = getattr(args, 'layer_p', args.layer_p)
+
+
 # @register_model_architecture('skip_transformer', 'transformer_iwslt_de_en')
 # def transformer_iwslt_de_en(args):
 #     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
