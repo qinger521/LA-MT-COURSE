@@ -22,10 +22,11 @@ from . import (
     FairseqIncrementalDecoder, FairseqEncoder, FairseqLanguageModel,
     FairseqModel, register_model, register_model_architecture,
 )
+from fairseq.modules.layer_history import CreateLayerHistory
 from fairseq.modules.efficient_block import CreateEfficientBlock
 
 
-@register_model('Block_transformer')
+@register_model('block_transformer')
 class BlockTransformerModel(FairseqModel):
     """
     Transformer model from `"Attention Is All You Need" (Vaswani, et al, 2017)
@@ -193,8 +194,8 @@ class BlockTransformerEncoder(FairseqEncoder):
 
         # create encoder layer history
         self.in_block_num = args.in_block_num
-        self.inner_block = CreateEfficientBlock(args, is_encoder=True)
-        self.outer_block = CreateEfficientBlock(args, is_encoder=True)
+        self.inner_block = CreateEfficientBlock(args, is_encoder=True, is_inner=True)
+        self.outer_block = CreateEfficientBlock(args, is_encoder=True, is_inner=False)
         self.layers = nn.ModuleList([])
         self.layers.extend([
             TransformerEncoderLayer(args)
@@ -223,6 +224,7 @@ class BlockTransformerEncoder(FairseqEncoder):
         """
         if self.inner_block is not None:
             self.inner_block.clean()
+            self.outer_block.clean()
         # embed tokens and positions
         x = self.embed_scale * self.embed_tokens(src_tokens)
         if self.embed_positions is not None:
@@ -253,8 +255,8 @@ class BlockTransformerEncoder(FairseqEncoder):
                 self.outer_block.add(self.inner_block.pop())
                 self.inner_block.reset(self.outer_block.pop())
 
-        if self.history is not None:
-            x = self.history.pop()
+        if self.inner_block is not None:
+            x = self.inner_block.pop()
 
         if self.normalize:
             x = self.layer_norm(x)
@@ -769,7 +771,8 @@ def base_architecture(args):
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
 
-    args.encoder_history_type = getattr(args, 'encoder_history_type', 'dense')
+    args.encoder_inner_block_type = getattr(args, 'encoder_inner_block_type', 'dense')
+    args.encoder_outer_block_type = getattr(args, 'encoder_outer_block_type', 'dense')
     args.decoder_history_type = getattr(args, 'decoder_history_type', 'dense')
     args.encoder_integration_type = getattr(args, 'encoder_integration_type', 'avg')
     args.decoder_integration_type = getattr(args, 'decoder_integration_type', 'avg')
@@ -780,7 +783,7 @@ def base_architecture(args):
 
 
 @register_model_architecture('block_transformer', 'block_transformer_wmt_en_de')
-def dense_transformer_wmt_en_de(args):
+def block_transformer_wmt_en_de(args):
     args.encoder_history_type = getattr(args, 'encoder_history_type', 'learnable_dense')
     args.decoder_history_type = getattr(args, 'decoder_history_type', 'learnable_dense')
     args.encoder_layers = 25
@@ -789,29 +792,31 @@ def dense_transformer_wmt_en_de(args):
 
 
 @register_model_architecture('block_transformer', 'block_transformer_t2t_wmt_en_de')
-def dense_transformer_t2t_wmt_en_de(args):
+def block_transformer_t2t_wmt_en_de(args):
     args.encoder_normalize_before = True
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.encoder_history_type = getattr(args, 'encoder_history_type', 'learnable_dense')
+    args.encoder_integration_type = getattr(args, 'encoder_integration_type', 'dense')
+    args.encoder_outer_block_type = getattr(args, 'encoder_outer_block_type', 'learnable_dense')
     args.decoder_history_type = getattr(args, 'decoder_history_type', 'learnable_dense')
-    args.encoder_layers = 25
+    args.encoder_layers = 30
+    args.in_block_num = 3
     base_architecture(args)
 
 
 
 @register_model_architecture('block_transformer', 'block_relative_transformer_wmt_en_de')
-def dense_relative_transformer_wmt_en_de(args):
+def block_relative_transformer_wmt_en_de(args):
     args.max_relative_length = 20
     args.encoder_layers = 6
-    dense_transformer_wmt_en_de(args)
+    block_relative_transformer_wmt_en_de(args)
 
 
 
 @register_model_architecture('block_transformer', 'block_relative_transformer_t2t_wmt_en_de')
-def dense_relative_transformer_t2t_wmt_en_de(args):
+def block_relative_transformer_t2t_wmt_en_de(args):
     args.max_relative_length = 20
     args.encoder_layers = 6
-    dense_transformer_t2t_wmt_en_de(args)
+    block_relative_transformer_t2t_wmt_en_de(args)
 
