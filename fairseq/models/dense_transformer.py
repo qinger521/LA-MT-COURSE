@@ -5,6 +5,10 @@
 # the root directory of this source tree. An additional grant of patent rights
 # can be found in the PATENTS file in the same directory.
 
+# author: Bei Li
+# email: libei_neu@outlook.com
+# time: 2018/12/9
+
 import math
 
 import torch
