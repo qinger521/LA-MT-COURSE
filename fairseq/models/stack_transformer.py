@@ -10,6 +10,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from collections import OrderedDict
 
 from fairseq import options, utils
 from fairseq.modules import (
@@ -23,9 +24,9 @@ from . import (
     FairseqModel, register_model, register_model_architecture,
 )
 
-
-@register_model('skip_transformer')
-class SkipTransformerModel(FairseqModel):
+import fairseq.utils as util
+@register_model('stack_transformer')
+class StackTransformerModel(FairseqModel):
     """
     Transformer model from `"Attention Is All You Need" (Vaswani, et al, 2017)
     <https://arxiv.org/abs/1706.03762>`_.
@@ -99,7 +100,14 @@ class SkipTransformerModel(FairseqModel):
                             help='the max relative length')
         parser.add_argument('--k-only', default=False, action='store_true',
                             help='select the relative mode to map relative position information')
+        #parser.add_argument('--k', type=int, default = -1,
+                            #help='')
         # fmt: on
+        parser.add_argument('--inspect-grad', default=False, action='store_true',
+                            help='inspect intermediate gradient')
+
+        parser.add_argument('--init-alpha', default=False, action='store_true',
+                            help='init alpha')
 
     @classmethod
     def build_model(cls, args, task):
@@ -149,8 +157,7 @@ class SkipTransformerModel(FairseqModel):
 
         encoder = TransformerEncoder(args, src_dict, encoder_embed_tokens)
         decoder = TransformerDecoder(args, tgt_dict, decoder_embed_tokens)
-        return SkipTransformerModel(encoder, decoder)
-
+        return StackTransformerModel(encoder, decoder)
 
 
 class TransformerEncoder(FairseqEncoder):
@@ -169,6 +176,7 @@ class TransformerEncoder(FairseqEncoder):
     def __init__(self, args, dictionary, embed_tokens, left_pad=True):
         super().__init__(dictionary)
         self.dropout = args.dropout
+        #self.k = args.k
 
         embed_dim = embed_tokens.embedding_dim
         self.padding_idx = embed_tokens.padding_idx
@@ -184,15 +192,20 @@ class TransformerEncoder(FairseqEncoder):
 
         self.layers = nn.ModuleList([])
         self.layers.extend([
-            TransformerEncoderLayer(args)
+            TransformerEncoderLayer(args, i+1)
             for i in range(args.encoder_layers)
         ])
         self.register_buffer('version', torch.Tensor([2]))
         self.normalize = args.encoder_normalize_before
+        self.stack_num = int(args.encoder_layers) // 6
         if self.normalize:
-            self.layer_norm = LayerNorm(embed_dim)
-        self.encoder_layers = args.encoder_layers
-        self.layer_p = args.layer_p
+            self.layer_norm = nn.ModuleList(LayerNorm(embed_dim) for _ in range(self.stack_num))
+        self.encoder_layer_out = []#保存每层的输出
+
+        self.inspected_grads = OrderedDict() if getattr(args, 'inspect_grad', False) else None
+        self.inspected_grads_qkv = OrderedDict() if getattr(args, 'inspect_grad', False) else None
+        self.inspected_grads_ffn_out = OrderedDict() if getattr(args, 'inspect_grad', False) else None
+
     def forward(self, src_tokens, src_lengths):
         """
         Args:
@@ -216,6 +229,8 @@ class TransformerEncoder(FairseqEncoder):
 
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
+        util.inspect_grad("encoder_0", x, self.inspected_grads)
+        #temp = x
 
         # compute padding mask
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
@@ -223,15 +238,27 @@ class TransformerEncoder(FairseqEncoder):
             encoder_padding_mask = None
 
         # encoder layers
-        for layer_num, layer in enumerate(self.layers):
-            layer_p = float((layer_num + 1) / self.encoder_layers) * self.layer_p
-            x = layer(x, encoder_padding_mask, layer_p)
+        for layer_id, layer in enumerate(self.layers):
+            x,qkv,ffn_out = layer(x, encoder_padding_mask)
+            util.inspect_grad("encoder_%d" % (layer_id+1), x, self.inspected_grads)
+            util.inspect_grad("encoder_%d_qkv" % (layer_id + 1), qkv, self.inspected_grads_qkv)
+            util.inspect_grad("encoder_%d_ffn" % (layer_id + 1), ffn_out, self.inspected_grads_ffn_out)
+            if (layer_id + 1) % 6 == 0:#每隔6层存储block输出
+                #x = self.layer_norm[(layer_id + 1) // 6 - 1](x)
+                self.encoder_layer_out.append(self.layer_norm[(layer_id + 1) // 6 - 1](x))
+        '''
+        for layer_id, layer in enumerate(self.layers):
+            if layer_id == self.k and self.k != -1:
+                x = layer(x+temp, encoder_padding_mask)
+            else:
+                x = layer(x, encoder_padding_mask)
+        '''
 
-        if self.normalize:
-            x = self.layer_norm(x)
+
+        util.inspect_grad("encoder_top", x, self.inspected_grads)
 
         return {
-            'encoder_out': x,  # T x B x C
+            'encoder_out': self.encoder_layer_out,  # T x B x C
             'encoder_padding_mask': encoder_padding_mask,  # B x T
         }
 
@@ -318,8 +345,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         self.layers = nn.ModuleList([])
         self.layers.extend([
-            TransformerDecoderLayer(args, no_encoder_attn)
-            for _ in range(args.decoder_layers)
+            TransformerDecoderLayer(args, i+1, no_encoder_attn)
+            for i in range(args.decoder_layers)
         ])
 
         self.adaptive_softmax = None
@@ -390,14 +417,16 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         inner_states = [x]
 
         # decoder layers
-        for layer_num, layer in enumerate(self.layers):
+        for layer_id, layer in enumerate(self.layers):
+            #print("dec-layer:{}".format(layer_id))
+            print(encoder_out is not None)
+            print(encoder_out['encoder_out'][layer_id])
             x, attn = layer(
                 x,
-                encoder_out['encoder_out'] if encoder_out is not None else None,
+                encoder_out['encoder_out'][layer_id] if encoder_out is not None else None,
                 encoder_out['encoder_padding_mask'] if encoder_out is not None else None,
                 incremental_state,
                 self_attn_mask=self.buffered_future_mask(x) if incremental_state is None else None,
-                layer_num=layer_num+1,
             )
             inner_states.append(x)
 
@@ -478,7 +507,7 @@ class TransformerEncoderLayer(nn.Module):
         args (argparse.Namespace): parsed command-line arguments
     """
 
-    def __init__(self, args):
+    def __init__(self, args, i):
         super().__init__()
         self.embed_dim = args.encoder_embed_dim
         if args.max_relative_length==-1:
@@ -495,11 +524,12 @@ class TransformerEncoderLayer(nn.Module):
         self.dropout = args.dropout
         self.relu_dropout = args.relu_dropout
         self.normalize_before = args.encoder_normalize_before
-        self.fc1 = Linear(self.embed_dim, args.encoder_ffn_embed_dim)
-        self.fc2 = Linear(args.encoder_ffn_embed_dim, self.embed_dim)
+        self.alpha = math.sqrt(i) if args.init_alpha else 1
+        self.fc1 = Linear(self.embed_dim, args.encoder_ffn_embed_dim, self.alpha)
+        self.fc2 = Linear(args.encoder_ffn_embed_dim, self.embed_dim, self.alpha)
         self.layer_norms = nn.ModuleList([LayerNorm(self.embed_dim) for i in range(2)])
 
-    def forward(self, x, encoder_padding_mask, layer_p):
+    def forward(self, x, encoder_padding_mask):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -509,41 +539,24 @@ class TransformerEncoderLayer(nn.Module):
         Returns:
             encoded output of shape `(batch, src_len, embed_dim)`
         """
-        scale = 1/ float(1 - layer_p)
         residual = x
         x = self.maybe_layer_norm(0, x, before=True)
-        if self.training:
-            if torch.rand(1)[0].item() >= layer_p:
-                x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
-                x = F.dropout(x, p=self.dropout, training=self.training)
-                x = scale * x
-            else:
-                x = 0
-        else:
-            x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
-
+        x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        qkv = x
         x = residual + x
         x = self.maybe_layer_norm(0, x, after=True)
 
         residual = x
         x = self.maybe_layer_norm(1, x, before=True)
-        if self.training:
-            if torch.rand(1)[0].item() >= layer_p:
-                x = F.relu(self.fc1(x))
-                x = F.dropout(x, p=self.relu_dropout, training=self.training)
-                x = self.fc2(x)
-                x = F.dropout(x, p=self.dropout, training=self.training)
-                x = scale * x
-            else:
-                x = 0
-        else:
-            x = F.relu(self.fc1(x))
-            x = F.dropout(x, p=self.relu_dropout, training=self.training)
-            x = self.fc2(x)
-
+        x = F.relu(self.fc1(x))
+        x = F.dropout(x, p=self.relu_dropout, training=self.training)
+        x = self.fc2(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        ffn_out = x
         x = residual + x
         x = self.maybe_layer_norm(1, x, after=True)
-        return x
+        return x,qkv,ffn_out
 
     def maybe_layer_norm(self, i, x, before=False, after=False):
         assert before ^ after
@@ -551,9 +564,6 @@ class TransformerEncoderLayer(nn.Module):
             return self.layer_norms[i](x)
         else:
             return x
-
-
-
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -573,7 +583,7 @@ class TransformerDecoderLayer(nn.Module):
             (default: False).
     """
 
-    def __init__(self, args, no_encoder_attn=False):
+    def __init__(self, args, i, no_encoder_attn=False):
         super().__init__()
         self.embed_dim = args.decoder_embed_dim
         if args.max_relative_length == -1:
@@ -601,14 +611,13 @@ class TransformerDecoderLayer(nn.Module):
                 self.embed_dim, args.decoder_attention_heads,
                 dropout=args.attention_dropout,
             )
-        self.encoder_attn_layer_norm = LayerNorm(self.embed_dim)
+            self.encoder_attn_layer_norm = LayerNorm(self.embed_dim)
 
-        self.fc1 = Linear(self.embed_dim, args.decoder_ffn_embed_dim)
-        self.fc2 = Linear(args.decoder_ffn_embed_dim, self.embed_dim)
+        self.alpha = math.sqrt(i) if args.init_alpha else 1
+        self.fc1 = Linear(self.embed_dim, args.decoder_ffn_embed_dim, self.alpha)
+        self.fc2 = Linear(args.decoder_ffn_embed_dim, self.embed_dim, self.alpha)
 
         self.final_layer_norm = LayerNorm(self.embed_dim)
-        self.layer_p = args.layer_p
-        self.decoder_layers = args.decoder_layers
         self.need_attn = True
 
         self.onnx_trace = False
@@ -618,7 +627,7 @@ class TransformerDecoderLayer(nn.Module):
 
     def forward(self, x, encoder_out, encoder_padding_mask, incremental_state,
                 prev_self_attn_state=None, prev_attn_state=None, self_attn_mask=None,
-                self_attn_padding_mask=None, layer_num=0):
+                self_attn_padding_mask=None):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -704,9 +713,9 @@ def Embedding(num_embeddings, embedding_dim, padding_idx):
     return m
 
 
-def Linear(in_features, out_features, bias=True):
+def Linear(in_features, out_features, alpha=1, bias=True):
     m = nn.Linear(in_features, out_features, bias)
-    nn.init.xavier_uniform_(m.weight)
+    nn.init.xavier_uniform_(m.weight, 1/alpha)
     if bias:
         nn.init.constant_(m.bias, 0.)
     return m
@@ -721,9 +730,7 @@ def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx, left_pad, le
         m = SinusoidalPositionalEmbedding(embedding_dim, padding_idx, left_pad, num_embeddings + padding_idx + 1)
     return m
 
-
-
-@register_model_architecture('skip_transformer', 'skip_transformer')
+@register_model_architecture('stack_transformer', 'stack_transformer')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -753,92 +760,153 @@ def base_architecture(args):
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
     args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
     args.k_only = getattr(args, 'k_only', args.k_only)
-    args.layer_p = getattr(args, 'layer_p', args.layer_p)
 
 
-# @register_model_architecture('skip_transformer', 'transformer_iwslt_de_en')
-# def transformer_iwslt_de_en(args):
-#     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
-#     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
-#     args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
-#     args.encoder_layers = getattr(args, 'encoder_layers', 6)
-#     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
-#     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 1024)
-#     args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
-#     args.decoder_layers = getattr(args, 'decoder_layers', 6)
-#     base_architecture(args)
 
-
-@register_model_architecture('skip_transformer', 'skip_transformer_wmt_en_de')
-def skip_transformer_wmt_en_de(args):
-    args.layer_p = 0.2
-    args.encoder_layers = 20
-    base_architecture(args)
-
-
-@register_model_architecture('skip_transformer', 'skip_transformer_t2t_wmt_en_de')
-def skip_transformer_t2t_wmt_en_de(args):
-    args.layer_p = 0.5
-    args.encoder_normalize_before = True
-    args.decoder_normalize_before = True
-    args.encoder_layers = 30
-    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    base_architecture(args)
-
-
-@register_model_architecture('skip_transformer', 'skip_relative_transformer_wmt_en_de')
-def skip_relative_transformer_wmt_en_de(args):
-    args.max_relative_length = 8
-    args.k_only = True
-    base_architecture(args)
-
-
-@register_model_architecture('skip_transformer', 'skip_relative_transformer_t2t_wmt_en_de')
-def skip_relative_transformer_t2t_wmt_en_de(args):
-    args.layer_p = 0.0
+@register_model_architecture('stack_transformer', 'stack_transformer_t2t_wmt_en_de_6l')
+def transformer_t2t_wmt_en_de_6l(args):
     args.encoder_normalize_before = True
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.encoder_layers = 30
+    args.encoder_layers = getattr(args, 'encoder_layers', 6)
+    args.decoder_layers = getattr(args, 'decoder_layers', 1)
     args.max_relative_length = 8
     args.k_only = True
+    args.init_alpha = False
+    args.inspect_grad = True
+    base_architecture(args)
+
+@register_model_architecture('stack_transformer', 'stack_transformer_t2t_wmt_en_de_12l')
+def transformer_t2t_wmt_en_de_12l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 12)
+    args.decoder_layers = getattr(args, 'decoder_layers', 2)
+    args.max_relative_length = 8
+    args.k_only = True
+    args.init_alpha = True
+    args.inspect_grad = True
+    base_architecture(args)
+
+@register_model_architecture('stack_transformer', 'stack_transformer_t2t_wmt_en_de_18l')
+def transformer_t2t_wmt_en_de_18l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 18)
+    args.decoder_layers = getattr(args, 'decoder_layers', 3)
+    args.max_relative_length = 8
+    args.k_only = True
+    args.init_alpha = True
+    args.inspect_grad = True
+    base_architecture(args)
+
+@register_model_architecture('stack_transformer', 'stack_transformer_t2t_wmt_en_de_21l')
+def transformer_t2t_wmt_en_de_21l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 21)
+    base_architecture(args)
+
+@register_model_architecture('stack_transformer', 'stack_transformer_t2t_wmt_en_de_24l')
+def transformer_t2t_wmt_en_de_24l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 24)
+    args.decoder_layers = getattr(args, 'decoder_layers', 4)
+    args.max_relative_length = 8
+    args.k_only = True
+    args.init_alpha = True
+    args.inspect_grad = True
+    base_architecture(args)
+
+@register_model_architecture('stack_transformer', 'stack_transformer_t2t_wmt_en_de_30l')
+def transformer_t2t_wmt_en_de_30l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 30)
+    args.decoder_layers = getattr(args, 'decoder_layers', 5)
+    args.max_relative_length = 8
+    args.k_only = True
+    args.init_alpha = True
+    args.inspect_grad = True
     base_architecture(args)
 
 
-# # parameters used in the "Attention Is All You Need" paper (Vaswani, et al, 2017)
-# @register_model_architecture('skip_transformer', 'transformer_vaswani_wmt_en_de_big')
-# def transformer_vaswani_wmt_en_de_big(args):
-#     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 1024)
-#     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 4096)
-#     args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 16)
-#     args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', False)
-#     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1024)
-#     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 4096)
-#     args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 16)
-#     args.dropout = getattr(args, 'dropout', 0.3)
-#     base_architecture(args)
-#
-#
-# @register_model_architecture('skip_transformer', 'transformer_vaswani_wmt_en_fr_big')
-# def transformer_vaswani_wmt_en_fr_big(args):
-#     args.dropout = getattr(args, 'dropout', 0.1)
-#     transformer_vaswani_wmt_en_de_big(args)
-#
-#
-# @register_model_architecture('skip_transformer', 'transformer_wmt_en_de_big')
-# def transformer_wmt_en_de_big(args):
-#     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-#     transformer_vaswani_wmt_en_de_big(args)
-#
-#
-# # default parameters used in tensor2tensor implementation
-# @register_model_architecture('skip_transformer', 'transformer_wmt_en_de_big_t2t')
-# def transformer_wmt_en_de_big_t2t(args):
-#     args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', True)
-#     args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', True)
-#     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-#     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-#     transformer_vaswani_wmt_en_de_big(args)
+@register_model_architecture('stack_transformer', 'stack_transformer_t2t_wmt_en_de_33l')
+def transformer_t2t_wmt_en_de_33l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 33)
+    base_architecture(args)
 
+@register_model_architecture('stack_transformer', 'stack_transformer_t2t_wmt_en_de_36l')
+def transformer_t2t_wmt_en_de_36l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 36)
+    args.decoder_layers = getattr(args, 'decoder_layers', 6)
+    args.max_relative_length = 8
+    args.k_only = True
+    args.init_alpha = True
+    args.inspect_grad = True
+    base_architecture(args)
+
+@register_model_architecture('stack_transformer', 'stack_transformer_t2t_wmt_en_de_40l')
+def transformer_t2t_wmt_en_de_40l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 40)
+    base_architecture(args)
+
+@register_model_architecture('stack_transformer', 'stack_transformer_t2t_wmt_en_de_42l')
+def transformer_t2t_wmt_en_de_42l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 42)
+    args.decoder_layers = getattr(args, 'decoder_layers', 7)
+    args.max_relative_length = 8
+    args.k_only = True
+    args.init_alpha = True
+    args.inspect_grad = True
+    base_architecture(args)
+
+@register_model_architecture('stack_transformer', 'stack_transformer_t2t_wmt_en_de_48l')
+def transformer_t2t_wmt_en_de_48l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 48)
+    args.decoder_layers = getattr(args, 'decoder_layers', 8)
+    args.max_relative_length = 8
+    args.k_only = True
+    args.inspect_grad=True
+    base_architecture(args)
+
+@register_model_architecture('stack_transformer', 'stack_transformer_t2t_wmt_en_de_96l')
+def transformer_t2t_wmt_en_de_96l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 96)
+    base_architecture(args)
