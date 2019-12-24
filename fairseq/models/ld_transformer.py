@@ -103,6 +103,10 @@ class LayerDropTransformerModel(FairseqModel):
                             help='the structure layer dropout of encoder side')
         parser.add_argument('--decoder-layer-dropout', type=int, metavar='N',
                             help='the structure layer dropout of decoder side')
+        parser.add_argument('--encoder-position-dropout', type=int, metavar='N',
+                            help='the position dropout of encoder side')
+        parser.add_argument('--decoder-position-dropout', type=int, metavar='N',
+                            help='the position dropout of decoder side')
         # fmt: on
 
     @classmethod
@@ -504,6 +508,7 @@ class TransformerEncoderLayer(nn.Module):
         self.fc1 = Linear(self.embed_dim, args.encoder_ffn_embed_dim)
         self.fc2 = Linear(args.encoder_ffn_embed_dim, self.embed_dim)
         self.layer_norms = nn.ModuleList([LayerNorm(self.embed_dim) for i in range(2)])
+        self.encoder_position_dropout = args.encoder_position_dropout
 
     def forward(self, x, encoder_padding_mask):
         """
@@ -519,6 +524,7 @@ class TransformerEncoderLayer(nn.Module):
         x = self.maybe_layer_norm(0, x, before=True)
         x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
         x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.position_dropout(x)
         x = residual + x
         x = self.maybe_layer_norm(0, x, after=True)
 
@@ -528,6 +534,7 @@ class TransformerEncoderLayer(nn.Module):
         x = F.dropout(x, p=self.relu_dropout, training=self.training)
         x = self.fc2(x)
         x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.position_dropout(x)
         x = residual + x
         x = self.maybe_layer_norm(1, x, after=True)
         return x
@@ -539,9 +546,12 @@ class TransformerEncoderLayer(nn.Module):
         else:
             return x
 
-    def position_dropout(self, x, layer_num):
-        postion_dropout = random.uniform(0, 1)
+    def position_dropout(self, x):
+        position_mask = (torch.rand(x.size(0)) > self.encoder_position_dropout).view(-1,1,1)
         if self.training:
+            x = x * position_mask
+        return x
+
 
 
 
@@ -745,6 +755,9 @@ def base_architecture(args):
     args.k_only = getattr(args, 'k_only', args.k_only)
     args.encoder_layer_dropout = getattr(args, 'encoder_layer_dropout', args.encoder_layer_dropout)
     args.decoder_layer_dropout = getattr(args, 'decoder_layer_dropout', args.decoder_layer_dropout)
+    args.encoder_position_dropout = getattr(args, 'encoder_position_dropout', args.encoder_position_dropout)
+    args.decoder_position_dropout = getattr(args, 'decoder_position_dropout', args.decoder_position_dropout)
+
 
 @register_model_architecture('ld_transformer', 'ld_transformer_iwslt_de_en')
 def ld_transformer_iwslt_de_en(args):
@@ -789,6 +802,7 @@ def ld_relative_transformer_t2t_wmt_en_de(args):
     args.encoder_layers = 30
     args.max_relative_length = 8
     args.k_only = True
-    args.encoder_layer_dropout = 0.2
+    args.encoder_layer_dropout = 0
     args.decoder_layer_dropout = 0
+    args.encoder_position_dropout = 0.1
     base_architecture(args)
