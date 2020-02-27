@@ -99,6 +99,8 @@ class SkipV2TransformerModel(FairseqModel):
                             help='the max relative length')
         parser.add_argument('--k-only', default=False, action='store_true',
                             help='select the relative mode to map relative position information')
+        parser.add_argument('--scale-inverse', default=False, action='store_true',
+                            help='scale the layer output under stochastic mode')
         # fmt: on
 
     @classmethod
@@ -152,6 +154,7 @@ class SkipV2TransformerModel(FairseqModel):
         return SkipV2TransformerModel(encoder, decoder)
 
 
+
 class TransformerEncoder(FairseqEncoder):
     """
     Transformer encoder consisting of *args.encoder_layers* layers. Each layer
@@ -188,10 +191,10 @@ class TransformerEncoder(FairseqEncoder):
         ])
         self.register_buffer('version', torch.Tensor([2]))
         self.normalize = args.encoder_normalize_before
-        if self.normalize:
-            self.layer_norm = LayerNorm(embed_dim)
         self.encoder_layers = args.encoder_layers
         self.layer_p = args.layer_p
+        if self.normalize:
+            self.layer_norm = LayerNorm(embed_dim)
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -481,7 +484,7 @@ class TransformerEncoderLayer(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.embed_dim = args.encoder_embed_dim
-        if args.max_relative_length == -1:
+        if args.max_relative_length==-1:
             self.self_attn = MultiheadAttention(
                 self.embed_dim, args.encoder_attention_heads,
                 dropout=args.attention_dropout,
@@ -498,6 +501,9 @@ class TransformerEncoderLayer(nn.Module):
         self.fc1 = Linear(self.embed_dim, args.encoder_ffn_embed_dim)
         self.fc2 = Linear(args.encoder_ffn_embed_dim, self.embed_dim)
         self.layer_norms = nn.ModuleList([LayerNorm(self.embed_dim) for i in range(2)])
+        self.layer_p = args.layer_p
+        self.scale_inverse = args.scale_inverse if args.scale_inverse is not None else True
+        self.encoder_layers = args.encoder_layers
 
     def forward(self, x, encoder_padding_mask, layer_p):
         """
@@ -509,31 +515,20 @@ class TransformerEncoderLayer(nn.Module):
         Returns:
             encoded output of shape `(batch, src_len, embed_dim)`
         """
-        scale = 1 / float(1 - layer_p)
-        residual = x
+        
+        coin = True
+        scale = 1/ float(1 - layer_p)
         if self.training:
-            if torch.rand(1)[0].item() >= layer_p:
-                x = self.maybe_layer_norm(0, x, before=True)
-                x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
-                x = F.dropout(x, p=self.dropout, training=self.training)
-                x = residual + x
-                x = self.maybe_layer_norm(0, x, after=True)
-
-                residual = x
-                x = self.maybe_layer_norm(1, x, before=True)
-                x = F.relu(self.fc1(x))
-                x = F.dropout(x, p=self.relu_dropout, training=self.training)
-                x = self.fc2(x)
-                x = F.dropout(x, p=self.dropout, training=self.training)
-                x = residual + x
-                x = scale * x
-                x = self.maybe_layer_norm(1, x, after=True)
-            else:
-                x = residual
-        else:
+            coin = (torch.rand(1)[0].item() >= layer_p)
+        if coin:
+            residual = x
             x = self.maybe_layer_norm(0, x, before=True)
             x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
             x = F.dropout(x, p=self.dropout, training=self.training)
+            
+            if self.training:
+                x = scale * x
+
             x = residual + x
             x = self.maybe_layer_norm(0, x, after=True)
 
@@ -543,8 +538,10 @@ class TransformerEncoderLayer(nn.Module):
             x = F.dropout(x, p=self.relu_dropout, training=self.training)
             x = self.fc2(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
+            if self.training:
+                x = scale * x
+
             x = residual + x
-            x = scale * x
             x = self.maybe_layer_norm(1, x, after=True)
 
         return x
@@ -758,6 +755,8 @@ def base_architecture(args):
     args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
     args.k_only = getattr(args, 'k_only', args.k_only)
     args.layer_p = getattr(args, 'layer_p', args.layer_p)
+    #args.scale_inverse = getattr(args, 'scale_inverse', args.scale_inverse)i
+    args.scale_inverse = True
 
 
 
@@ -789,14 +788,15 @@ def skip_v2_relative_transformer_wmt_en_de(args):
 
 @register_model_architecture('skip_v2_transformer', 'skip_v2_relative_transformer_t2t_wmt_en_de')
 def skip_v2_relative_transformer_t2t_wmt_en_de(args):
-    args.layer_p = 0.3
+    args.layer_p = 0.2
     args.encoder_normalize_before = True
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.encoder_layers = 30
+    args.encoder_layers = 40
     args.max_relative_length = 8
     args.k_only = True
+    #args.scale_inverse = True
     base_architecture(args)
 
 
