@@ -150,6 +150,9 @@ class Trainer(object):
             self.meters.update(extra_state['train_meters'])
             del extra_state['train_meters']
 
+            last_optim = self._optim_history[-1]
+            self._num_updates = last_optim['num_updates']
+
             # reset TimeMeters, since their start times don't make sense anymore
             for meter in self.meters.values():
                 if isinstance(meter, TimeMeter):
