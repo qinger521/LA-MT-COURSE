@@ -24,8 +24,8 @@ from . import (
 )
 
 
-@register_model('reg_transformer')
-class RegTransformerModel(FairseqModel):
+@register_model('skip_sublayer_transformer')
+class SkipSublayerTransformerModel(FairseqModel):
     """
     Transformer model from `"Attention Is All You Need" (Vaswani, et al, 2017)
     <https://arxiv.org/abs/1706.03762>`_.
@@ -97,14 +97,10 @@ class RegTransformerModel(FairseqModel):
                             help='sets adaptive softmax dropout for the tail projections')
         parser.add_argument('--max-relative-length', type=int, default=-1,
                             help='the max relative length')
-        parser.add_argument('--encoder-reg-position',type=str, metavar='STR',
-                            default=None,help='Encoder Regularized position')
-        parser.add_argument('--encoder-reg-alpha', action='store_true',
-                            help='the alpha of reg')
-        parser.add_argument('--decoder-reg-position',type=str, metavar='STR',
-                            default=None,help='Decoder Regularized position')
-        parser.add_argument('--decoder-reg-alpha', action='store_true',
-                            help='the alpha of reg')
+        parser.add_argument('--k-only', default=False, action='store_true',
+                            help='select the relative mode to map relative position information')
+        parser.add_argument('--layer-p', type=int, metavar='N',
+                            help='the probability of skipping each sublayer')
         # fmt: on
 
     @classmethod
@@ -138,7 +134,7 @@ class RegTransformerModel(FairseqModel):
                 raise ValueError(
                     '--share-all-embeddings requires --encoder-embed-dim to match --decoder-embed-dim')
             if args.decoder_embed_path and (
-                    args.decoder_embed_path != args.encoder_embed_path):
+                args.decoder_embed_path != args.encoder_embed_path):
                 raise ValueError('--share-all-embeddings not compatible with --decoder-embed-path')
             encoder_embed_tokens = build_embedding(
                 src_dict, args.encoder_embed_dim, args.encoder_embed_path
@@ -155,8 +151,7 @@ class RegTransformerModel(FairseqModel):
 
         encoder = TransformerEncoder(args, src_dict, encoder_embed_tokens)
         decoder = TransformerDecoder(args, tgt_dict, decoder_embed_tokens)
-        return RegTransformerModel(encoder, decoder)
-
+        return SkipSublayerTransformerModel(encoder, decoder)
 
 
 class TransformerEncoder(FairseqEncoder):
@@ -179,7 +174,6 @@ class TransformerEncoder(FairseqEncoder):
         embed_dim = embed_tokens.embedding_dim
         self.padding_idx = embed_tokens.padding_idx
         self.max_source_positions = args.max_source_positions
-        self.encoder_reg_position = args.encoder_reg_position
 
         self.embed_tokens = embed_tokens
         self.embed_scale = math.sqrt(embed_dim)
@@ -196,10 +190,8 @@ class TransformerEncoder(FairseqEncoder):
         ])
         self.register_buffer('version', torch.Tensor([2]))
         self.normalize = args.encoder_normalize_before
-        self.encoder_reg_alpha = args.encoder_reg_alpha
-        if self.encoder_reg_alpha and self.encoder_reg_position is not None:
-            self.Sigmoid = torch.nn.Sigmoid()
-            self.alpha = nn.Parameter(torch.rand(1))
+        self.encoder_layers = args.encoder_layers
+        self.layer_p = args.layer_p
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
 
@@ -232,66 +224,17 @@ class TransformerEncoder(FairseqEncoder):
         if not encoder_padding_mask.any():
             encoder_padding_mask = None
 
-        # store the layers output
-        inner_states = []
-        attn_weight_states = []
-        qkv_states = []
         # encoder layers
-        for layer in self.layers:
-            x, attn_weight,qkv = layer(x, encoder_padding_mask)
-            inner_states.append(x)
-            attn_weight_states.append(attn_weight)
-            qkv_states.append(qkv)
+        for layer_num, layer in enumerate(self.layers):
+            # layer_p = float((layer_num + 1) / (self.encoder_layers * 2)) * self.layer_p
+            x = layer(x, encoder_padding_mask, layer_num)
 
         if self.normalize:
             x = self.layer_norm(x)
-        # compute the regularization
-        reg = 0
-        if self.encoder_reg_position is not None:
-            ref_position = self.encoder_reg_position.split(':')
-            reg_list=[]
-            for i in ref_position:
-                if i == 'layer_out':
-                   reg_list.append(self.cosin(inner_states, "layer_out", encoder_padding_mask, False))
-                elif i == 'attn':
-                   reg_list.append(self.cosin(qkv_states, "attn", encoder_padding_mask, False))
-                elif i == 'attn_weight':
-                   reg_list.append(self.cosin(attn_weight_states, "attn_weight", encoder_padding_mask, False))
-                else:
-                   raise ValueError('--reg_position error')
-            for item in reg_list:
-                reg += item
 
-        '''
-        if self.reg_position == 'layer_out':
-            reg = self.cosin(inner_states, "layer_out", encoder_padding_mask, False)
-            reg = torch.mean(reg)
-        elif self.reg_position == 'attn':
-            reg = self.cosin(qkv_states, "attn", encoder_padding_mask, False)
-            reg = torch.mean(reg)
-        elif self.reg_position == 'attn_weight':
-            reg = self.cosin(attn_weight_states, "attn_weight", encoder_padding_mask, False)
-            reg = torch.mean(reg)
-        elif self.reg_position == 'all':
-            reg_layerout = self.cosin(inner_states, "layer_out", encoder_padding_mask, False)
-            reg_attn = self.cosin(qkv_states, "attn", encoder_padding_mask, False)
-            reg_attn_weight = self.cosin(attn_weight_states, "attn_weight", encoder_padding_mask, False)
-            reg_layerout = torch.mean(reg_layerout)
-            reg_attn = torch.mean(reg_attn)
-            reg_attn_weight = torch.mean(reg_attn_weight)
-            #reg = reg_attn_weight + reg_attn + reg_layerout
-            reg = torch.add(reg_attn_weight, torch.add(reg_layerout,reg_attn))
-        else:
-            raise ValueError('--reg_position error')
-        '''
-        #print(reg) 
-        #print('--------------------')
-        if self.encoder_reg_alpha and self.encoder_reg_position is not None:
-            reg = torch.mul(self.Sigmoid(self.alpha).type_as(reg), reg)
         return {
             'encoder_out': x,  # T x B x C
             'encoder_padding_mask': encoder_padding_mask,  # B x T
-            'reg':reg,
         }
 
     def reorder_encoder_out(self, encoder_out, new_order):
@@ -333,25 +276,6 @@ class TransformerEncoder(FairseqEncoder):
             self.normalize = False
             state_dict[version_key] = torch.Tensor([1])
         return state_dict
-    def cosin(self,state_dict , type, encoder_padding_mask,add_one=False):
-        reg = 0
-        for layer_i in range(len(self.layers)):
-            for layer_j in range(layer_i + 1, len(self.layers)):
-                cos = torch.nn.CosineSimilarity(dim=2, eps=1e-6)
-                cosin = cos(state_dict[layer_i], state_dict[layer_j])
-                reg += cosin
-        if encoder_padding_mask is not None:
-            if type == 'attn' or type == 'layer_out':
-                encoder_reg_mask = encoder_padding_mask.transpose(0, 1)
-            elif type == 'attn_weight':
-                encoder_reg_mask = encoder_padding_mask
-            eye = torch.ones_like(encoder_reg_mask)
-            encoder_reg_mask = eye - encoder_reg_mask
-            reg = reg[encoder_reg_mask]
-        else:
-            reg = reg.view(-1)
-        #return torch.mul(alpha, torch.mean(reg))
-        return torch.mean(reg)
 
 
 class TransformerDecoder(FairseqIncrementalDecoder):
@@ -380,10 +304,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         embed_dim = args.decoder_embed_dim
         output_embed_dim = args.decoder_output_dim
 
-        self.padding_idx = embed_tokens.padding_idx
+        padding_idx = embed_tokens.padding_idx
         self.max_target_positions = args.max_target_positions
-        self.decoder_reg_position = args.decoder_reg_position
-        self.decoder_reg_alpha = args.decoder_reg_alpha
 
         self.embed_tokens = embed_tokens
         self.embed_scale = math.sqrt(embed_dim)  # todo: try with input_embed_dim
@@ -391,7 +313,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.project_in_dim = Linear(input_embed_dim, embed_dim, bias=False) if embed_dim != input_embed_dim else None
 
         self.embed_positions = PositionalEmbedding(
-            args.max_target_positions, embed_dim, self.padding_idx,
+            args.max_target_positions, embed_dim, padding_idx,
             left_pad=left_pad,
             learned=args.decoder_learned_pos,
         ) if not args.no_token_positional_embeddings else None
@@ -422,9 +344,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             nn.init.normal_(self.embed_out, mean=0, std=output_embed_dim ** -0.5)
         self.register_buffer('version', torch.Tensor([2]))
         self.normalize = args.decoder_normalize_before and final_norm
-        if self.decoder_reg_alpha and self.decoder_reg_position is not None:
-            self.Sigmoid = torch.nn.Sigmoid()
-            self.alpha = nn.Parameter(torch.rand(1))
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
 
@@ -470,55 +389,23 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         x = x.transpose(0, 1)
         attn = None
 
-        decoder_padding_mask = prev_output_tokens.eq(self.padding_idx)
-
-        inner_states = []
-        enc_dec_attn_weight_states = []
-        enc_dec_qkv_states =[]
-        self_qkv_states = []
-        self_attn_weight_states = []
+        inner_states = [x]
 
         # decoder layers
-        for layer in self.layers:
-            x, attn, enc_dec_qkv, self_qkv, self_attn_weight = layer(
+        for layer_num, layer in enumerate(self.layers):
+            x, attn = layer(
                 x,
                 encoder_out['encoder_out'] if encoder_out is not None else None,
                 encoder_out['encoder_padding_mask'] if encoder_out is not None else None,
                 incremental_state,
                 self_attn_mask=self.buffered_future_mask(x) if incremental_state is None else None,
+                layer_num=layer_num + 1,
             )
             inner_states.append(x)
-            enc_dec_attn_weight_states.append(attn)
-            enc_dec_qkv_states.append(enc_dec_qkv)
-            self_qkv_states.append(self_qkv)
-            self_attn_weight_states.append(self_attn_weight)
 
         if self.normalize:
             x = self.layer_norm(x)
-        reg = 0
-        if self.decoder_reg_position is not None:
-            ref_position = self.decoder_reg_position.split(':')
-            reg_list = []
-            for i in ref_position:
-                if i == 'layer_out':
-                    reg_list.append(self.cosin(inner_states, "layer_out", decoder_padding_mask, False))
-                elif i == 'enc_dec_attn_weight':
-                    reg_list.append(self.cosin(enc_dec_attn_weight_states, "attn_weight", decoder_padding_mask, False))
-                elif i == 'self_attn':
-                    reg_list.append(
-                        self.cosin(self_qkv_states, "attn", decoder_padding_mask, False))
-                elif i == 'self_attn_weight':
-                    reg_list.append(
-                        self.cosin(self_attn_weight_states, "attn_weight", decoder_padding_mask, False))
-                elif i == 'enc_dec_attn':
-                    reg_list.append(
-                        self.cosin(enc_dec_qkv_states, "attn", decoder_padding_mask, False))
-                else:
-                    raise ValueError('--dec_reg_position error')
-            for item in reg_list:
-                reg += item
-        if self.decoder_reg_alpha and self.decoder_reg_position is not None:
-            reg = torch.mul(self.Sigmoid(self.alpha).type_as(reg), reg)
+
         # T x B x C -> B x T x C
         x = x.transpose(0, 1)
 
@@ -532,9 +419,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             else:
                 x = F.linear(x, self.embed_out)
 
-        #return x, {'attn': attn, 'inner_states': inner_states, 'reg': encoder_out['reg']}
-        return x, {'attn': attn, 'inner_states': inner_states, 'enc_reg': encoder_out['reg']
-            ,'dec_reg':reg}
+        return x, {'attn': attn, 'inner_states': inner_states}
 
     def max_positions(self):
         """Maximum output length supported by the decoder."""
@@ -578,25 +463,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             state_dict['{}.version'.format(name)] = torch.Tensor([1])
 
         return state_dict
-    def cosin(self,state_dict , type, encoder_padding_mask,add_one=False):
-        reg = 0
-        for layer_i in range(len(self.layers)):
-            for layer_j in range(layer_i + 1, len(self.layers)):
-                cos = torch.nn.CosineSimilarity(dim=2, eps=1e-6)
-                cosin = cos(state_dict[layer_i], state_dict[layer_j])
-                reg += cosin
-        if encoder_padding_mask is not None:
-            if type == 'attn' or type == 'layer_out':
-                encoder_reg_mask = encoder_padding_mask.transpose(0, 1)
-            elif type == 'attn_weight':
-                encoder_reg_mask = encoder_padding_mask
-            eye = torch.ones_like(encoder_reg_mask)
-            encoder_reg_mask = eye - encoder_reg_mask
-            reg = reg[encoder_reg_mask]
-        else:
-            reg = reg.view(-1)
-        #return torch.mul(alpha, torch.mean(reg))
-        return torch.mean(reg)
 
 
 class TransformerEncoderLayer(nn.Module):
@@ -617,7 +483,7 @@ class TransformerEncoderLayer(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.embed_dim = args.encoder_embed_dim
-        if args.max_relative_length==-1:
+        if args.max_relative_length == -1:
             self.self_attn = MultiheadAttention(
                 self.embed_dim, args.encoder_attention_heads,
                 dropout=args.attention_dropout,
@@ -625,7 +491,7 @@ class TransformerEncoderLayer(nn.Module):
         else:
             self.self_attn = RelativeMultiheadAttention(
                 self.embed_dim, args.encoder_attention_heads,
-                args.max_relative_length, dropout=args.attention_dropout,
+                args.max_relative_length, dropout=args.attention_dropout, k_only=args.k_only,
             )
 
         self.dropout = args.dropout
@@ -634,8 +500,11 @@ class TransformerEncoderLayer(nn.Module):
         self.fc1 = Linear(self.embed_dim, args.encoder_ffn_embed_dim)
         self.fc2 = Linear(args.encoder_ffn_embed_dim, self.embed_dim)
         self.layer_norms = nn.ModuleList([LayerNorm(self.embed_dim) for i in range(2)])
+        self.layer_p = args.layer_p
+        self.scale_inverse = args.scale_inverse if args.scale_inverse is not None else True
+        self.encoder_layers = args.encoder_layers * 2
 
-    def forward(self, x, encoder_padding_mask):
+    def forward(self, x, encoder_padding_mask, layer_num):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -645,24 +514,45 @@ class TransformerEncoderLayer(nn.Module):
         Returns:
             encoded output of shape `(batch, src_len, embed_dim)`
         """
-        residual = x
-        x = self.maybe_layer_norm(0, x, before=True)
-        x, attn_weight = self.self_attn(query=x, key=x, value=x,type='EncWeight',  key_padding_mask=encoder_padding_mask)
-        #print(attn_weight)
-        qkv = x
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        x = residual + x
-        x = self.maybe_layer_norm(0, x, after=True)
 
-        residual = x
-        x = self.maybe_layer_norm(1, x, before=True)
-        x = F.relu(self.fc1(x))
-        x = F.dropout(x, p=self.relu_dropout, training=self.training)
-        x = self.fc2(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        x = residual + x
-        x = self.maybe_layer_norm(1, x, after=True)
-        return x, attn_weight,qkv
+        skip_attn = True
+        skip_ffn = True
+
+        p_attn = ((2 * layer_num + 1) / self.encoder_layers) * self.layer_p
+        p_fnn = ((2 * layer_num + 2) / self.encoder_layers) * self.layer_p
+
+        attn_scale = 1 / (1 - p_attn)
+        ffn_scale = 1 / (1 - p_fnn)
+        if self.training:
+            skip_attn = (torch.rand(1)[0].item() >= p_attn)
+            skip_ffn = (torch.rand(1)[0].item() >= p_fnn)
+
+        if skip_attn:
+            residual = x
+            x = self.maybe_layer_norm(0, x, before=True)
+            x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+
+            if self.training:
+                x = attn_scale * x
+
+            x = residual + x
+            x = self.maybe_layer_norm(0, x, after=True)
+
+        if skip_ffn:
+            residual = x
+            x = self.maybe_layer_norm(1, x, before=True)
+            x = F.relu(self.fc1(x))
+            x = F.dropout(x, p=self.relu_dropout, training=self.training)
+            x = self.fc2(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+            if self.training:
+                x = ffn_scale * x
+
+            x = residual + x
+            x = self.maybe_layer_norm(1, x, after=True)
+
+        return x
 
     def maybe_layer_norm(self, i, x, before=False, after=False):
         assert before ^ after
@@ -700,7 +590,7 @@ class TransformerDecoderLayer(nn.Module):
         else:
             self.self_attn = RelativeMultiheadAttention(
                 self.embed_dim, args.decoder_attention_heads,
-                args.max_relative_length, dropout=args.attention_dropout,
+                args.max_relative_length, dropout=args.attention_dropout, k_only=args.k_only,
             )
 
         self.dropout = args.dropout
@@ -717,12 +607,14 @@ class TransformerDecoderLayer(nn.Module):
                 self.embed_dim, args.decoder_attention_heads,
                 dropout=args.attention_dropout,
             )
-            self.encoder_attn_layer_norm = LayerNorm(self.embed_dim)
+        self.encoder_attn_layer_norm = LayerNorm(self.embed_dim)
 
         self.fc1 = Linear(self.embed_dim, args.decoder_ffn_embed_dim)
         self.fc2 = Linear(args.decoder_ffn_embed_dim, self.embed_dim)
 
         self.final_layer_norm = LayerNorm(self.embed_dim)
+        self.layer_p = args.layer_p
+        self.decoder_layers = args.decoder_layers
         self.need_attn = True
 
         self.onnx_trace = False
@@ -732,7 +624,7 @@ class TransformerDecoderLayer(nn.Module):
 
     def forward(self, x, encoder_out, encoder_padding_mask, incremental_state,
                 prev_self_attn_state=None, prev_attn_state=None, self_attn_mask=None,
-                self_attn_padding_mask=None):
+                self_attn_padding_mask=None, layer_num=0):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -750,17 +642,15 @@ class TransformerDecoderLayer(nn.Module):
             prev_key, prev_value = prev_self_attn_state
             saved_state = {"prev_key": prev_key, "prev_value": prev_value}
             self.self_attn._set_input_buffer(incremental_state, saved_state)
-        x, self_attn_weight = self.self_attn(
+        x, _ = self.self_attn(
             query=x,
             key=x,
             value=x,
-            type='DecWeight',
             key_padding_mask=self_attn_padding_mask,
             incremental_state=incremental_state,
-            need_weights=True,
+            need_weights=False,
             attn_mask=self_attn_mask,
         )
-        self_qkv = x
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
         x = self.maybe_layer_norm(self.self_attn_layer_norm, x, after=True)
@@ -779,13 +669,11 @@ class TransformerDecoderLayer(nn.Module):
                 query=x,
                 key=encoder_out,
                 value=encoder_out,
-                type='Enc-DecWeight',
                 key_padding_mask=encoder_padding_mask,
                 incremental_state=incremental_state,
                 static_kv=True,
-                need_weights=True,
+                need_weights=(not self.training and self.need_attn),
             )
-            enc_dec_qkv = x
             x = F.dropout(x, p=self.dropout, training=self.training)
             x = residual + x
             x = self.maybe_layer_norm(self.encoder_attn_layer_norm, x, after=True)
@@ -802,7 +690,7 @@ class TransformerDecoderLayer(nn.Module):
             saved_state = self.self_attn._get_input_buffer(incremental_state)
             self_attn_state = saved_state["prev_key"], saved_state["prev_value"]
             return x, attn, self_attn_state
-        return x, attn,enc_dec_qkv, self_qkv, self_attn_weight
+        return x, attn
 
     def maybe_layer_norm(self, layer_norm, x, before=False, after=False):
         assert before ^ after
@@ -838,20 +726,9 @@ def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx, left_pad, le
     else:
         m = SinusoidalPositionalEmbedding(embedding_dim, padding_idx, left_pad, num_embeddings + padding_idx + 1)
     return m
-def KL_devergence(P, Q):
-    #sum(P * log(P / Q))
-    return torch.sum(torch.mul(P,torch.log(torch.div(P,Q))))
-
-def JS_devergence(P, Q):
-    M = torch.add(P, Q)
-    PM = KL_devergence(P, M)
-    QM = KL_devergence(Q, M)
-    js = torch.div(torch.add(PM,QM),2.0)
-    return js
 
 
-
-@register_model_architecture('reg_transformer', 'reg_transformer')
+@register_model_architecture('skip_sublayer_transformer', 'skip_sublayer_transformer')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -880,89 +757,48 @@ def base_architecture(args):
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
     args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
-    args.encoder_reg_position = getattr(args,'encoder_reg_position',args.encoder_reg_position)
-    args.encoder_reg_alpha = getattr(args, 'encoder_reg_alpha', False)
-    args.decoder_reg_position = getattr(args,'decoder_reg_position',args.decoder_reg_position)
-    args.decoder_reg_alpha = getattr(args, 'decoder_reg_alpha', False)
+    args.k_only = getattr(args, 'k_only', args.k_only)
+    args.layer_p = getattr(args, 'layer_p', args.layer_p)
+    # args.scale_inverse = getattr(args, 'scale_inverse', args.scale_inverse)i
+    args.scale_inverse = True
 
 
-
-@register_model_architecture('reg_transformer', 'reg_transformer_wmt_en_de')
-def reg_transformer_wmt_en_de(args):
+@register_model_architecture('skip_sublayer_transformer', 'skip_sublayer_transformer_wmt_en_de')
+def skip_sublayer_transformer_wmt_en_de(args):
+    args.layer_p = 0.2
+    args.encoder_layers = 20
     base_architecture(args)
 
 
-@register_model_architecture('reg_transformer', 'reg_transformer_t2t_wmt_en_de')
-def reg_transformer_t2t_wmt_en_de(args):
+@register_model_architecture('skip_sublayer_transformer', 'skip_sublayer_transformer_t2t_wmt_en_de')
+def skip_sublayer_transformer_t2t_wmt_en_de(args):
+    args.layer_p = 0.2
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.encoder_layers = 20
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    base_architecture(args)
+
+
+@register_model_architecture('skip_sublayer_transformer', 'skip_sublayer_relative_transformer_wmt_en_de')
+def skip_sublayer_relative_transformer_wmt_en_de(args):
+    args.max_relative_length = 8
+    args.k_only = True
+    base_architecture(args)
+
+
+@register_model_architecture('skip_sublayer_transformer', 'skip_sublayer_relative_transformer_t2t_wmt_en_de')
+def skip_sublayer_relative_transformer_t2t_wmt_en_de(args):
+    args.layer_p = 0.2
     args.encoder_normalize_before = True
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.encoder_layers = 20
-    base_architecture(args)
-
-@register_model_architecture('reg_transformer', 'reg_transformer_iwslt_de_en')
-def reg_transformer_iwslt_de_en(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
-    args.encoder_layers = getattr(args, 'encoder_layers', 6)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 1024)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
-    args.decoder_layers = getattr(args, 'decoder_layers', 6)
-    args.dropout = getattr(args, 'dropout', 0.3)
-    #args.reg_position = 'layer_out'
-    base_architecture(args)
-
-@register_model_architecture('reg_transformer', 'reg_relative_transformer_wmt_en_de')
-def reg_relative_transformer_wmt_en_de(args):
-    args.max_relative_length = 20
+    args.encoder_layers = 40
+    args.max_relative_length = 8
+    args.k_only = True
+    # args.scale_inverse = True
     base_architecture(args)
 
 
-@register_model_architecture('reg_transformer', 'reg_relative_transformer_t2t_wmt_en_de')
-def reg_relative_transformer_t2t_wmt_en_de(args):
-    args.encoder_normalize_before = True
-    args.decoder_normalize_before = True
-    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.encoder_layers = 20
-    args.max_relative_length = 20
-    base_architecture(args)
-
-
-# parameters used in the "Attention Is All You Need" paper (Vaswani, et al, 2017)
-@register_model_architecture('reg_transformer', 'reg_transformer_vaswani_wmt_en_de_big')
-def reg_transformer_vaswani_wmt_en_de_big(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 1024)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 4096)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 16)
-    args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', False)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1024)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 4096)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 16)
-    args.dropout = getattr(args, 'dropout', 0.3)
-    base_architecture(args)
-
-
-@register_model_architecture('reg_transformer', 'reg_transformer_vaswani_wmt_en_fr_big')
-def reg_transformer_vaswani_wmt_en_fr_big(args):
-    args.dropout = getattr(args, 'dropout', 0.1)
-    reg_transformer_vaswani_wmt_en_de_big(args)
-
-
-@register_model_architecture('reg_transformer', 'reg_transformer_wmt_en_de_big')
-def reg_transformer_wmt_en_de_big(args):
-    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-    reg_transformer_vaswani_wmt_en_de_big(args)
-
-
-# default parameters used in tensor2tensor implementation
-@register_model_architecture('reg_transformer', 'reg_transformer_wmt_en_de_big_t2t')
-def reg_transformer_wmt_en_de_big_t2t(args):
-    args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', True)
-    args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', True)
-    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    reg_transformer_vaswani_wmt_en_de_big(args)

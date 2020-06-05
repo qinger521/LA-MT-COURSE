@@ -224,7 +224,7 @@ class TransformerEncoder(FairseqEncoder):
 
         # encoder layers
         for layer_num, layer in enumerate(self.layers):
-            layer_p = float((layer_num + 1) / self.encoder_layers) * self.layer_p
+            layer_p = float((layer_num + 1) / self.encoder_layers) * self.layer_p if layer_num > 0 and layer_num < self.encoder_layers else 0
             x = layer(x, encoder_padding_mask, layer_p)
 
         if self.normalize:
@@ -512,7 +512,7 @@ class TransformerEncoderLayer(nn.Module):
         scale = 1/ float(1 - layer_p)
         residual = x
         x = self.maybe_layer_norm(0, x, before=True)
-        if self.training:
+        if self.training and scale !=1:
             if torch.rand(1)[0].item() >= layer_p:
                 x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
                 x = F.dropout(x, p=self.dropout, training=self.training)
@@ -521,13 +521,17 @@ class TransformerEncoderLayer(nn.Module):
                 x = 0
         else:
             x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
+            # layer 1 and the last encoder layer also use this branch besides inference
+            x = F.dropout(x, p=self.dropout, training=self.training)
+            if scale !=1:
+                x = scale * x
 
         x = residual + x
         x = self.maybe_layer_norm(0, x, after=True)
 
         residual = x
         x = self.maybe_layer_norm(1, x, before=True)
-        if self.training:
+        if self.training and scale !=1:
             if torch.rand(1)[0].item() >= layer_p:
                 x = F.relu(self.fc1(x))
                 x = F.dropout(x, p=self.relu_dropout, training=self.training)
@@ -540,6 +544,10 @@ class TransformerEncoderLayer(nn.Module):
             x = F.relu(self.fc1(x))
             x = F.dropout(x, p=self.relu_dropout, training=self.training)
             x = self.fc2(x)
+            # layer 1 and the last encoder layer also use this branch besides inference
+            x = F.dropout(x, p=self.dropout, training=self.training)
+            if scale !=1:
+                x = scale * x
 
         x = residual + x
         x = self.maybe_layer_norm(1, x, after=True)
@@ -796,7 +804,7 @@ def skip_relative_transformer_wmt_en_de(args):
 
 @register_model_architecture('skip_transformer', 'skip_relative_transformer_t2t_wmt_en_de')
 def skip_relative_transformer_t2t_wmt_en_de(args):
-    args.layer_p = 0.0
+    args.layer_p = 0.2
     args.encoder_normalize_before = True
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)

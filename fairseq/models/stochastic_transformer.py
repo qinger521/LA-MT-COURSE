@@ -905,7 +905,7 @@ def relative_transformer_t2t_wmt_en_de(args):
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.encoder_layers = 40
+    args.encoder_layers = 48
     args.max_relative_length = 8
     args.k_only = True
     args.layer_p = 0.5
