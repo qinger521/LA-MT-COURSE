@@ -24,8 +24,8 @@ from . import (
 )
 
 
-@register_model('swapout_transformer')
-class SwapoutTransformerModel(FairseqModel):
+@register_model('heterogeneous_transformer')
+class TransformerModel(FairseqModel):
     """
     Transformer model from `"Attention Is All You Need" (Vaswani, et al, 2017)
     <https://arxiv.org/abs/1706.03762>`_.
@@ -99,12 +99,6 @@ class SwapoutTransformerModel(FairseqModel):
                             help='the max relative length')
         parser.add_argument('--k-only', default=False, action='store_true',
                             help='select the relative mode to map relative position information')
-        parser.add_argument('--theta1', type=float, metavar='D',
-                            help='theta1 probability in swapout')
-        parser.add_argument('--theta2', type=float, metavar='D',
-                            help='theta2 probability in swapout')
-        parser.add_argument('--linear-theta', default=False, action='store_true',
-                            help='apply linear method for swapout theta')
         # fmt: on
 
     @classmethod
@@ -153,13 +147,13 @@ class SwapoutTransformerModel(FairseqModel):
                 tgt_dict, args.decoder_embed_dim, args.decoder_embed_path
             )
 
-        encoder = TransformerEncoder(args, src_dict, encoder_embed_tokens)
-        decoder = TransformerDecoder(args, tgt_dict, decoder_embed_tokens)
-        return SwapoutTransformerModel(encoder, decoder)
+        encoder = HeterogeneousTransformerEncoder(args, src_dict, encoder_embed_tokens)
+        decoder = HeterogeneousTransformerDecoder(args, tgt_dict, decoder_embed_tokens)
+        return TransformerModel(encoder, decoder)
 
 
 
-class TransformerEncoder(FairseqEncoder):
+class HeterogeneousTransformerEncoder(FairseqEncoder):
     """
     Transformer encoder consisting of *args.encoder_layers* layers. Each layer
     is a :class:`TransformerEncoderLayer`.
@@ -196,11 +190,10 @@ class TransformerEncoder(FairseqEncoder):
         self.register_buffer('version', torch.Tensor([2]))
         self.normalize = args.encoder_normalize_before
         if self.normalize:
-            self.layer_norm = LayerNorm(embed_dim)
-        self.encoder_layers = args.encoder_layers
-        self.theta1 = args.theta1
-        self.theta2 = args.theta2
-        self.linear_theta = args.linear_theta
+            self.layer_norm = LayerNorm(args.decoder_embed_dim)
+
+        self.fc1 = Linear(args.encoder_embed_dim, args.encoder_to_decoder_dim)
+        self.fc2 = Linear(args.encoder_to_decoder_dim, args.decoder_embed_dim)
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -232,14 +225,12 @@ class TransformerEncoder(FairseqEncoder):
             encoder_padding_mask = None
 
         # encoder layers
-        for layer_num, layer in enumerate(self.layers):
-            if self.linear_theta:
-                drop1 = float(layer_num / (self.encoder_layers-1)) * (1 - self.theta1)
-                drop2 = float(layer_num / (self.encoder_layers-1)) * (1 - self.theta2)
-            else:
-                drop1 = 1 - self.theta1
-                drop2 = 1 - self.theta2
-            x = layer(x, encoder_padding_mask, drop1, drop2)
+        for layer in self.layers:
+            x = layer(x, encoder_padding_mask)
+
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)
 
         if self.normalize:
             x = self.layer_norm(x)
@@ -290,7 +281,7 @@ class TransformerEncoder(FairseqEncoder):
         return state_dict
 
 
-class TransformerDecoder(FairseqIncrementalDecoder):
+class HeterogeneousTransformerDecoder(FairseqIncrementalDecoder):
     """
     Transformer decoder consisting of *args.decoder_layers* layers. Each layer
     is a :class:`TransformerDecoderLayer`.
@@ -358,10 +349,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.normalize = args.decoder_normalize_before and final_norm
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
-        self.decoder_layers = args.decoder_layers
-        self.theta1 = args.theta1
-        self.theta2 = args.theta2
-        self.linear_theta = args.linear_theta
 
     def forward(self, prev_output_tokens, encoder_out=None, incremental_state=None):
         """
@@ -408,20 +395,13 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         inner_states = [x]
 
         # decoder layers
-        for layer_num, layer in enumerate(self.layers):
-            if self.linear_theta:
-                drop1 = float(layer_num / (self.decoder_layers-1)) * (1 - self.theta1)
-                drop2 = float(layer_num / (self.decoder_layers-1)) * (1 - self.theta2)
-            else:
-                drop1 = 1 - self.theta1
-                drop2 = 1 - self.theta2
+        for layer in self.layers:
             x, attn = layer(
                 x,
                 encoder_out['encoder_out'] if encoder_out is not None else None,
                 encoder_out['encoder_padding_mask'] if encoder_out is not None else None,
                 incremental_state,
                 self_attn_mask=self.buffered_future_mask(x) if incremental_state is None else None,
-                drop1=drop1, drop2=drop2
             )
             inner_states.append(x)
 
@@ -523,7 +503,7 @@ class TransformerEncoderLayer(nn.Module):
         self.fc2 = Linear(args.encoder_ffn_embed_dim, self.embed_dim)
         self.layer_norms = nn.ModuleList([LayerNorm(self.embed_dim) for i in range(2)])
 
-    def forward(self, x, encoder_padding_mask, drop1, drop2):
+    def forward(self, x, encoder_padding_mask):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -533,19 +513,19 @@ class TransformerEncoderLayer(nn.Module):
         Returns:
             encoded output of shape `(batch, src_len, embed_dim)`
         """
-        residual = F.dropout(x, p=drop1, training=self.training)
+        residual = x
         x = self.maybe_layer_norm(0, x, before=True)
         x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
-        x = F.dropout(x, p=drop2, training=self.training)
+        x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
         x = self.maybe_layer_norm(0, x, after=True)
 
-        residual = F.dropout(x, p=drop1, training=self.training)
+        residual = x
         x = self.maybe_layer_norm(1, x, before=True)
         x = F.relu(self.fc1(x))
         x = F.dropout(x, p=self.relu_dropout, training=self.training)
         x = self.fc2(x)
-        x = F.dropout(x, p=drop2, training=self.training)
+        x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
         x = self.maybe_layer_norm(1, x, after=True)
         return x
@@ -618,7 +598,7 @@ class TransformerDecoderLayer(nn.Module):
 
     def forward(self, x, encoder_out, encoder_padding_mask, incremental_state,
                 prev_self_attn_state=None, prev_attn_state=None, self_attn_mask=None,
-                self_attn_padding_mask=None, drop1=1, drop2=1):
+                self_attn_padding_mask=None):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -628,7 +608,7 @@ class TransformerDecoderLayer(nn.Module):
         Returns:
             encoded output of shape `(batch, src_len, embed_dim)`
         """
-        residual = F.dropout(x, p=drop1, training=self.training)
+        residual = x
         x = self.maybe_layer_norm(self.self_attn_layer_norm, x, before=True)
         if prev_self_attn_state is not None:
             if incremental_state is None:
@@ -645,13 +625,13 @@ class TransformerDecoderLayer(nn.Module):
             need_weights=False,
             attn_mask=self_attn_mask,
         )
-        x = F.dropout(x, p=drop2, training=self.training)
+        x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
         x = self.maybe_layer_norm(self.self_attn_layer_norm, x, after=True)
 
         attn = None
         if self.encoder_attn is not None:
-            residual = F.dropout(x, p=drop1, training=self.training)
+            residual = x
             x = self.maybe_layer_norm(self.encoder_attn_layer_norm, x, before=True)
             if prev_attn_state is not None:
                 if incremental_state is None:
@@ -668,16 +648,16 @@ class TransformerDecoderLayer(nn.Module):
                 static_kv=True,
                 need_weights=(not self.training and self.need_attn),
             )
-            x = F.dropout(x, p=drop2, training=self.training)
+            x = F.dropout(x, p=self.dropout, training=self.training)
             x = residual + x
             x = self.maybe_layer_norm(self.encoder_attn_layer_norm, x, after=True)
 
-        residual = F.dropout(x, p=drop1, training=self.training)
+        residual = x
         x = self.maybe_layer_norm(self.final_layer_norm, x, before=True)
         x = F.relu(self.fc1(x))
         x = F.dropout(x, p=self.relu_dropout, training=self.training)
         x = self.fc2(x)
-        x = F.dropout(x, p=drop2, training=self.training)
+        x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
         x = self.maybe_layer_norm(self.final_layer_norm, x, after=True)
         if self.onnx_trace:
@@ -722,8 +702,7 @@ def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx, left_pad, le
     return m
 
 
-
-@register_model_architecture('swapout_transformer', 'swapout_transformer')
+@register_model_architecture('heterogeneous_transformer', 'heterogeneous_transformer')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -753,64 +732,51 @@ def base_architecture(args):
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
     args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
     args.k_only = getattr(args, 'k_only', args.k_only)
-    #args.theta1 = getattr(args, 'theta1', 0.5)
-    #args.theta2 = getattr(args, 'theta2', 0.5)
-    #args.linear_theta = True
+    args.encoder_to_decoder_dim = getattr(args, 'encoder_to_decoder_dim', args.encoder_to_decoder_dim)
 
-
-@register_model_architecture('swapout_transformer', 'swapout_transformer_iwslt_de_en')
-def transformer_iwslt_de_en(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
-    args.encoder_layers = getattr(args, 'encoder_layers', 6)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 1024)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
-    args.decoder_layers = getattr(args, 'decoder_layers', 6)
+@register_model_architecture('heterogeneous_transformer', 'heterogeneous_transformer_wmt_en_de')
+def heterogeneous_transformer_wmt_en_de(args):
     base_architecture(args)
 
 
-@register_model_architecture('swapout_transformer', 'swapout_transformer_wmt_en_de')
-def transformer_wmt_en_de(args):
-    base_architecture(args)
-
-
-@register_model_architecture('swapout_transformer', 'swapout_transformer_t2t_wmt_en_de')
-def transformer_t2t_wmt_en_de(args):
+@register_model_architecture('heterogeneous_transformer', 'heterogeneous_transformer_t2t_wmt_en_de')
+def heterogeneous_transformer_t2t_wmt_en_de(args):
     args.encoder_normalize_before = True
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.theta1 = getattr(args, 'theta1', 0.5)
-    args.theta2 = getattr(args, 'theta2', 0.5)
-    args.linear_theta = True
-    args.encoder_layers = 30
     base_architecture(args)
 
 
-
-@register_model_architecture('swapout_transformer', 'swapout_relative_transformer_wmt_en_de')
-def relative_transformer_wmt_en_de(args):
+@register_model_architecture('heterogeneous_transformer', 'heterogeneous_relative_transformer_wmt_en_de')
+def heterogeneous_relative_transformer_wmt_en_de(args):
     args.max_relative_length = 8
     args.k_only = True
     base_architecture(args)
 
 
-@register_model_architecture('swapout_transformer', 'swapout_relative_transformer_t2t_wmt_en_de')
-def relative_transformer_t2t_wmt_en_de(args):
+@register_model_architecture('heterogeneous_transformer', 'heterogeneous_relative_transformer_t2t_wmt_en_de')
+def heterogeneous_relative_transformer_t2t_wmt_en_de(args):
+    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 1024)
+    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 4096)
+    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 16)
+    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
+    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 2048)
+    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 8)
+    args.encoder_to_decoder_dim = getattr(args, 'encoder_to_decoder_dim', 4096)
+    args.dropout = getattr(args, 'dropout', 0.1)
     args.encoder_normalize_before = True
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.encoder_layers = 40
+    args.encoder_layers = 18
     args.max_relative_length = 8
     args.k_only = True
     base_architecture(args)
 
 
 # parameters used in the "Attention Is All You Need" paper (Vaswani, et al, 2017)
-@register_model_architecture('swapout_transformer', 'swapout_transformer_vaswani_wmt_en_de_big')
+@register_model_architecture('heterogeneous_transformer', 'heterogeneous_transformer_vaswani_wmt_en_de_big')
 def transformer_vaswani_wmt_en_de_big(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 1024)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 4096)
@@ -823,41 +789,17 @@ def transformer_vaswani_wmt_en_de_big(args):
     base_architecture(args)
 
 
-@register_model_architecture('swapout_transformer', 'swapout_transformer_vaswani_wmt_en_fr_big')
-def transformer_vaswani_wmt_en_fr_big(args):
-    args.dropout = getattr(args, 'dropout', 0.1)
-    transformer_vaswani_wmt_en_de_big(args)
-
-
-@register_model_architecture('swapout_transformer', 'swapout_transformer_wmt_en_de_big')
-def transformer_wmt_en_de_big(args):
+@register_model_architecture('heterogeneous_transformer', 'heterogeneous_transformer_wmt_en_de_big')
+def heterogeneous_transformer_wmt_en_de_big(args):
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     transformer_vaswani_wmt_en_de_big(args)
 
 
 # default parameters used in tensor2tensor implementation
-@register_model_architecture('swapout_transformer', 'swapout_transformer_wmt_en_de_big_t2t')
-def transformer_wmt_en_de_big_t2t(args):
+@register_model_architecture('heterogeneous_transformer', 'heterogeneous_transformer_wmt_en_de_big_t2t')
+def heterogeneous_transformer_wmt_en_de_big_t2t(args):
     args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', True)
     args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', True)
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
     transformer_vaswani_wmt_en_de_big(args)
-
-
-@register_model_architecture('swapout_transformer', 'swapout_relative_transformer_test')
-def relative_transformer_test(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 64)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 256)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
-    args.encoder_layers = getattr(args, 'encoder_layers', 4)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 64)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 256)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
-    args.decoder_layers = getattr(args, 'decoder_layers', 4)
-    args.encoder_normalize_before = True
-    args.decoder_normalize_before = True
-    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.max_relative_length = 20
-    base_architecture(args)
