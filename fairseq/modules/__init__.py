@@ -25,6 +25,7 @@ from .scalar_bias import ScalarBias
 from .sinusoidal_positional_embedding import SinusoidalPositionalEmbedding
 from .unfold1d import unfold1d
 from .relative_multihead_attention import RelativeMultiheadAttention
+from .random_multihead_attention import SyntheticMultiheadAttention
 
 __all__ = [
     'AdaptiveInput',
@@ -47,4 +48,5 @@ __all__ = [
     'SinusoidalPositionalEmbedding',
     'unfold1d',
     'RelativeMultiheadAttention',
+    'SyntheticMultiheadAttention',
 ]
