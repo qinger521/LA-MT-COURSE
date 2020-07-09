@@ -501,7 +501,7 @@ class HighwayTransformerEncoderLayer(nn.Module):
 
         self.gate_type = args.gate_type
         self.act_type = args.act_type
-        self.activation = F.sigmoid() if self.act_type == 0 else F.tanh()
+        self.activation = F.sigmoid if self.act_type == 0 else F.tanh
 
         self.gate_attn = Linear(self.embed_dim, self.embed_dim)
         self.highway_attn = Linear(self.embed_dim, self.embed_dim)
@@ -510,7 +510,7 @@ class HighwayTransformerEncoderLayer(nn.Module):
         self.highway_ffn = Linear(self.embed_dim, self.embed_dim)
 
 
-def forward(self, x, encoder_padding_mask):
+    def forward(self, x, encoder_padding_mask):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -546,7 +546,9 @@ def forward(self, x, encoder_padding_mask):
             x = T * self.highway_ffn(x) + (1 - T) * x + f2
         else:
             raise ValueError("invaid gate type!")
+
         x = self.maybe_layer_norm(1, x, after=True)
+
         return x
 
     def maybe_layer_norm(self, i, x, before=False, after=False):
@@ -719,34 +721,6 @@ def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx, left_pad, le
     else:
         m = SinusoidalPositionalEmbedding(embedding_dim, padding_idx, left_pad, num_embeddings + padding_idx + 1)
     return m
-
-
-@register_model_architecture('transformer_lm', 'transformer_lm')
-def base_lm_architecture(args):
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 2048)
-    args.decoder_layers = getattr(args, 'decoder_layers', 6)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 8)
-    args.adaptive_softmax_cutoff = getattr(args, 'adaptive_softmax_cutoff', None)
-    args.adaptive_softmax_dropout = getattr(args, 'adaptive_softmax_dropout', 0)
-    args.adaptive_softmax_factor = getattr(args, 'adaptive_softmax_factor', 4)
-    args.decoder_learned_pos = getattr(args, 'decoder_learned_pos', False)
-
-    args.character_embeddings = getattr(args, 'character_embeddings', False)
-
-    args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
-    args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
-
-    # The model training is not stable without this
-    args.decoder_normalize_before = True
-
-    args.adaptive_input = getattr(args, 'adaptive_input', False)
-    args.adaptive_input_factor = getattr(args, 'adaptive_input_factor', 4)
-    args.adaptive_input_cutoff = getattr(args, 'adaptive_input_cutoff', None)
-
-    args.tie_adaptive_weights = getattr(args, 'tie_adaptive_weights', False)
-    args.tie_adaptive_proj = getattr(args, 'tie_adaptive_proj', False)
-
 
 
 
