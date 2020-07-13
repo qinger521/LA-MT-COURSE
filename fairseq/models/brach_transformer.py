@@ -224,6 +224,10 @@ class BranchTransformerEncoder(FairseqEncoder):
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
 
+    def layer_mb(self, layer_branches, x, encoder_padding_mask):
+        layer_outputs = [m(x, encoder_padding_mask) for m in layer_branches]
+        return merge_branches(layer_outputs, self.branch_dropout, self.training)
+
     def forward(self, src_tokens, src_lengths):
         """
         Args:
@@ -389,6 +393,10 @@ class BranchTransformerDecoder(FairseqIncrementalDecoder):
         self.normalize = args.decoder_normalize_before and final_norm
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
+
+    def layer_mb(self, layer_branches, layer_args, layer_kwargs):
+        layer_outputs = [m(*layer_args, **layer_kwargs) for m in layer_branches]
+        return merge_branches(layer_outputs, self.branch_dropout, self.training)
 
     def forward(self, prev_output_tokens, encoder_out=None, incremental_state=None):
         """
@@ -1151,6 +1159,8 @@ def transformer_t2t_wmt_en_de(args):
 def relative_transformer_wmt_en_de(args):
     args.max_relative_length = 8
     args.k_only = True
+    args.join_pffn = True
+    args.join_layer = True
     base_architecture(args)
 
 
@@ -1160,12 +1170,16 @@ def relative_transformer_t2t_wmt_en_de(args):
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.decoder_branches = 3
-    args.encoder_branches = 3
+    args.decoder_branches = 2
+    args.encoder_branches = 2
     args.branch_dropout = 0.2
-    args.encoder_layers = 24
+    args.encoder_layers = 6
+    args.encoder_ffn_embed_dim = 12288
+    args.decoder_fnn_embed_dim = 12288
     args.max_relative_length = 8
     args.k_only = True
+    args.join_pffn = True
+    args.join_layer = True
     base_architecture(args)
 
 
