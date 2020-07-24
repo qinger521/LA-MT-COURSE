@@ -25,7 +25,7 @@ from . import (
 
 
 @register_model('gated_transformer')
-class HighwayTransformerModel(FairseqModel):
+class GatedTransformerModel(FairseqModel):
     """
     Transformer model from `"Attention Is All You Need" (Vaswani, et al, 2017)
     <https://arxiv.org/abs/1706.03762>`_.
@@ -149,7 +149,7 @@ class HighwayTransformerModel(FairseqModel):
 
         encoder = GatedTransformerEncoder(args, src_dict, encoder_embed_tokens)
         decoder = GatedTransformerDecoder(args, tgt_dict, decoder_embed_tokens)
-        return HighwayTransformerModel(encoder, decoder)
+        return GatedTransformerModel(encoder, decoder)
 
 class GatedTransformerEncoder(FairseqEncoder):
     """
