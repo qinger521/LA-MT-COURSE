@@ -630,19 +630,19 @@ class EncoderLayerTrans(nn.Module):
 
         # generate self_attn parameters
         layer.self_attn.in_proj_weight = \
-            self.trans_self_attn_in_weight(pre_layer.self_attn.in_proj_weight)
+            torch.tanh(self.trans_self_attn_in_weight(pre_layer.self_attn.in_proj_weight))
         layer.self_attn.in_proj_bias = \
-            self.trans_self_attn_in_bias(pre_layer.self_attn.in_proj_bias)
+            torch.tanh(self.trans_self_attn_in_bias(pre_layer.self_attn.in_proj_bias))
         layer.self_attn.out_proj.weight = \
-            self.trans_self_attn_out_weight(pre_layer.self_attn.out_proj.weight)
+            torch.tanh(self.trans_self_attn_out_weight(pre_layer.self_attn.out_proj.weight))
         layer.self_attn.out_proj.bias = \
-            self.trans_self_attn_out_bias(pre_layer.self_attn.out_proj.bias)
+            torch.tanh(self.trans_self_attn_out_bias(pre_layer.self_attn.out_proj.bias))
 
         # fc1 and fc2
-        layer.fc1.weight = self.trans_fc1_weight(pre_layer.fc1.weight)
-        layer.fc1.bias = self.trans_fc1_bias(pre_layer.fc1.bias)
-        layer.fc2.weight = self.trans_fc2_weight(pre_layer.fc2.weight)
-        layer.fc2.bias = self.trans_fc2_bias(pre_layer.fc2.bias)
+        layer.fc1.weight = torch.tanh(self.trans_fc1_weight(pre_layer.fc1.weight))
+        layer.fc1.bias = torch.tanh(self.trans_fc1_bias(pre_layer.fc1.bias))
+        layer.fc2.weight = torch.tanh(self.trans_fc2_weight(pre_layer.fc2.weight))
+        layer.fc2.bias = torch.tanh(self.trans_fc2_bias(pre_layer.fc2.bias))
 
         # ln1 and ln2
         layer.layer_norms[0].weight = self.trans_ln1_weight(pre_layer.layer_norms[0].weight)
@@ -1069,7 +1069,6 @@ def Linear(in_features, out_features, bias=True):
     if bias:
         nn.init.constant_(m.bias, 0.)
     return m
-
 
 def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx, left_pad, learned=False):
     if learned:
