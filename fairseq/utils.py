@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import traceback
+from typing import Callable, List
 
 import torch
 import torch.nn.functional as F
@@ -463,3 +464,16 @@ def log_softmax(x, dim, onnx_trace=False):
         return F.log_softmax(x.float(), dim=dim)
     else:
         return F.log_softmax(x, dim=dim, dtype=torch.float32)
+
+def get_activation_fn(activation: str) -> Callable:
+    """ Returns the activation function corresponding to `activation` """
+    if activation == 'relu':
+        return F.relu
+    elif activation == 'sigmoid':
+        return torch.sigmoid
+    elif activation == 'tanh':
+        return torch.tanh
+    elif activation == 'linear':
+        return lambda x: x
+    else:
+        raise RuntimeError("--activation-fn {} not supported".format(activation))

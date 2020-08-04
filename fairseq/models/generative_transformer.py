@@ -606,27 +606,33 @@ class EncoderLayerTrans(nn.Module):
 
     def __init__(self, args):
         super().__init__()
-        # self_attn
-        self.trans_self_attn_in_weight = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
-        self.trans_self_attn_in_bias = Linear(3 * args.encoder_embed_dim, 3 * args.encoder_embed_dim)
-        self.trans_self_attn_out_weight = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
-        self.trans_self_attn_out_bias = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
+
         self.rpr = args.max_relative_length
         self.k_only = args.k_only
-        if self.rpr != -1:
-            self.trans_self_attn_rpr_keys = Linear(2 * self.rpr + 1, 2 * self.rpr + 1)
-            if not self.k_only:
-                self.trans_self_attn_rpr_values = Linear(2 * self.rpr + 1, 2 * self.rpr + 1)
-        # fc1 and fc2
-        self.trans_fc1_weight = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
-        self.trans_fc1_bias = Linear(args.encoder_ffn_embed_dim, args.encoder_ffn_embed_dim)
-        self.trans_fc2_weight = Linear(args.encoder_ffn_embed_dim, args.encoder_ffn_embed_dim)
-        self.trans_fc2_bias = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
-        # layer_norms
-        self.trans_ln1_weight = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
-        self.trans_ln1_bias = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
-        self.trans_ln2_weight = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
-        self.trans_ln2_bias = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
+        # self_attn
+        self.trans_mode = args.trans_mode
+        self.activation_fn = utils.get_activation_fn(activation=getattr(args, 'activation_fn', 'tanh'))
+        if self.trans_mode == "Linear":
+            self.trans_self_attn_in_weight = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
+            self.trans_self_attn_in_bias = Linear(3 * args.encoder_embed_dim, 3 * args.encoder_embed_dim)
+            self.trans_self_attn_out_weight = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
+            self.trans_self_attn_out_bias = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
+            if self.rpr != -1:
+                self.trans_self_attn_rpr_keys = Linear(2 * self.rpr + 1, 2 * self.rpr + 1)
+                if not self.k_only:
+                    self.trans_self_attn_rpr_values = Linear(2 * self.rpr + 1, 2 * self.rpr + 1)
+
+            # fc1 and fc2
+            self.trans_fc1_weight = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
+            self.trans_fc1_bias = Linear(args.encoder_ffn_embed_dim, args.encoder_ffn_embed_dim)
+            self.trans_fc2_weight = Linear(args.encoder_ffn_embed_dim, args.encoder_ffn_embed_dim)
+            self.trans_fc2_bias = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
+            # layer_norms
+            self.trans_ln1_weight = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
+            self.trans_ln1_bias = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
+            self.trans_ln2_weight = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
+            self.trans_ln2_bias = Linear(args.encoder_embed_dim, args.encoder_embed_dim)
+
 
     def forward(self, pre_layer):
         """
@@ -638,34 +644,67 @@ class EncoderLayerTrans(nn.Module):
         layer = GenerativeEncoderLayer(pre_layer, rpr=self.rpr)
 
         # generate self_attn parameters
-        layer.self_attn.in_proj_weight = \
-            torch.tanh(self.trans_self_attn_in_weight(pre_layer.self_attn.in_proj_weight))
-        layer.self_attn.in_proj_bias = \
-            torch.tanh(self.trans_self_attn_in_bias(pre_layer.self_attn.in_proj_bias))
-        layer.self_attn.out_proj.weight = \
-            torch.tanh(self.trans_self_attn_out_weight(pre_layer.self_attn.out_proj.weight))
-        layer.self_attn.out_proj.bias = \
-            torch.tanh(self.trans_self_attn_out_bias(pre_layer.self_attn.out_proj.bias))
-        if self.rpr != -1:
-            trans_keys = \
-                torch.tanh(self.trans_self_attn_rpr_keys(torch.transpose(pre_layer.self_attn.relative_position_keys, 0, 1)))
-            layer.self_attn.relative_position_keys = torch.transpose(trans_keys, 0, 1)
-            if not self.k_only:
-                trans_values = \
-                    torch.tanh(self.trans_self_attn_rpr_keys(torch.transpose(pre_layer.self_attn.relative_position_values, 0, 1)))
-                layer.self_attn.relative_position_values = torch.transpose(trans_values, 0, 1)
+        if self.trans_mode == "Linear":
+            layer.self_attn.in_proj_weight = \
+                self.activation_fn(self.trans_self_attn_in_weight(pre_layer.self_attn.in_proj_weight))
+            layer.self_attn.in_proj_bias = \
+                self.activation_fn(self.trans_self_attn_in_bias(pre_layer.self_attn.in_proj_bias))
+            layer.self_attn.out_proj.weight = \
+                self.activation_fn(self.trans_self_attn_out_weight(pre_layer.self_attn.out_proj.weight))
+            layer.self_attn.out_proj.bias = \
+                self.activation_fn(self.trans_self_attn_out_bias(pre_layer.self_attn.out_proj.bias))
+            if self.rpr != -1:
+                trans_keys = \
+                    self.activation_fn(self.trans_self_attn_rpr_keys(torch.transpose(pre_layer.self_attn.relative_position_keys, 0, 1)))
+                layer.self_attn.relative_position_keys = torch.transpose(trans_keys, 0, 1)
+                # if not self.k_only:
+                #     trans_values = \
+                #         torch.tanh(self.trans_self_attn_rpr_keys(torch.transpose(pre_layer.self_attn.relative_position_values, 0, 1)))
+                #     layer.self_attn.relative_position_values = torch.transpose(trans_values, 0, 1)
 
-        # fc1 and fc2
-        layer.fc1.weight = torch.tanh(self.trans_fc1_weight(pre_layer.fc1.weight))
-        layer.fc1.bias = torch.tanh(self.trans_fc1_bias(pre_layer.fc1.bias))
-        layer.fc2.weight = torch.tanh(self.trans_fc2_weight(pre_layer.fc2.weight))
-        layer.fc2.bias = torch.tanh(self.trans_fc2_bias(pre_layer.fc2.bias))
+            # fc1 and fc2
+            layer.fc1.weight = self.activation_fn(self.trans_fc1_weight(pre_layer.fc1.weight))
+            layer.fc1.bias = self.activation_fn(self.trans_fc1_bias(pre_layer.fc1.bias))
+            layer.fc2.weight = self.activation_fnh(self.trans_fc2_weight(pre_layer.fc2.weight))
+            layer.fc2.bias = self.activation_fn(self.trans_fc2_bias(pre_layer.fc2.bias))
 
-        # ln1 and ln2
-        layer.layer_norms[0].weight = self.trans_ln1_weight(pre_layer.layer_norms[0].weight)
-        layer.layer_norms[0].bias = self.trans_ln1_bias(pre_layer.layer_norms[0].bias)
-        layer.layer_norms[1].weight = self.trans_ln2_weight(pre_layer.layer_norms[1].weight)
-        layer.layer_norms[1].bias = self.trans_ln2_bias(pre_layer.layer_norms[1].bias)
+            # ln1 and ln2
+            layer.layer_norms[0].weight = self.activation_fn(self.trans_ln1_weight(pre_layer.layer_norms[0].weight))
+            layer.layer_norms[0].bias = self.activation_fn(self.trans_ln1_bias(pre_layer.layer_norms[0].bias))
+            layer.layer_norms[1].weight = self.activation_fn(self.trans_ln2_weight(pre_layer.layer_norms[1].weight))
+            layer.layer_norms[1].bias = self.activation_fn(self.trans_ln2_bias(pre_layer.layer_norms[1].bias))
+
+        elif self.trans_mode == "Activation":
+
+            layer.self_attn.in_proj_weight = \
+                self.activation_fn(pre_layer.self_attn.in_proj_weight)
+            layer.self_attn.in_proj_bias = \
+                self.activation_fn(pre_layer.self_attn.in_proj_bias)
+            layer.self_attn.out_proj.weight = \
+                self.activation_fn(pre_layer.self_attn.out_proj.weight)
+            layer.self_attn.out_proj.bias = \
+                self.activation_fn(pre_layer.self_attn.out_proj.bias)
+            if self.rpr != -1:
+                trans_keys = \
+                    self.activation_fn(
+                        torch.transpose(pre_layer.self_attn.relative_position_keys, 0, 1))
+                layer.self_attn.relative_position_keys = torch.transpose(trans_keys, 0, 1)
+                # if not self.k_only:
+                #     trans_values = \
+                #         torch.tanh(self.trans_self_attn_rpr_keys(torch.transpose(pre_layer.self_attn.relative_position_values, 0, 1)))
+                #     layer.self_attn.relative_position_values = torch.transpose(trans_values, 0, 1)
+
+            # fc1 and fc2
+            layer.fc1.weight = self.activation_fn(pre_layer.fc1.weight)
+            layer.fc1.bias = self.activation_fn(pre_layer.fc1.bias)
+            layer.fc2.weight = self.activation_fn(pre_layer.fc2.weight)
+            layer.fc2.bias = self.activation_fn(pre_layer.fc2.bias)
+
+            # ln1 and ln2
+            layer.layer_norms[0].weight = self.activation_fn(pre_layer.layer_norms[0].weight)
+            layer.layer_norms[0].bias = self.activation_fn(pre_layer.layer_norms[0].bias)
+            layer.layer_norms[1].weight = self.activation_fn(pre_layer.layer_norms[1].weight)
+            layer.layer_norms[1].bias = self.activation_fn(pre_layer.layer_norms[1].bias)
 
         return layer
 
@@ -1424,6 +1463,8 @@ def base_architecture(args):
     args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
     args.k_only = getattr(args, 'k_only', args.k_only)
     args.enc_calculate_num = getattr(args, 'enc_calculate_num', args.enc_calculate_num)
+    args.activation_fn = getattr(args, 'activation_fn', 'tanh')
+    args.trans_mode = getattr(args, 'trans_mode', 'Activation')
 
 @register_model_architecture('generative_transformer', 'generative_transformer_iwslt_de_en')
 def transformer_iwslt_de_en(args):
