@@ -24,7 +24,7 @@ if [ $task == "wmt-en2de" ]; then
         keep_last_epochs=10
         max_epoch=21
         max_update=
-        data_dir=google
+        data_dir=iwslt14.tokenized.de-en
         src_lang=en
         tgt_lang=de
 elif [ $task == "ldc" ]; then
