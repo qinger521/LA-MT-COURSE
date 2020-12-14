@@ -7,7 +7,7 @@
 
 # author: Bei Li
 # email: libei_neu@outlook.com
-# time: 2018/12/9
+# time: 2020/07/30
 
 import math
 
@@ -166,7 +166,125 @@ class GroupShareTransformerModel(FairseqModel):
         decoder = GroupShareTransformerDecoder(args, tgt_dict, decoder_embed_tokens)
         return GroupShareTransformerModel(encoder, decoder)
 
+@register_model('group_share_transformer_lm')
+class GroupShareTransformerLanguageModel(FairseqLanguageModel):
+    def __init__(self, decoder):
+        super().__init__(decoder)
 
+    @staticmethod
+    def add_args(parser):
+        """Add model-specific arguments to the parser."""
+        # fmt: off
+        parser.add_argument('--dropout', default=0.1, type=float, metavar='D',
+                            help='dropout probability')
+        parser.add_argument('--attention-dropout', default=0., type=float, metavar='D',
+                            help='dropout probability for attention weights')
+        parser.add_argument('--relu-dropout', default=0., type=float, metavar='D',
+                            help='dropout probability after ReLU in FFN')
+        parser.add_argument('--decoder-embed-dim', type=int, metavar='N',
+                            help='decoder embedding dimension')
+        parser.add_argument('--decoder-output-dim', type=int, metavar='N',
+                            help='decoder output dimension')
+        parser.add_argument('--decoder-input-dim', type=int, metavar='N',
+                            help='decoder input dimension')
+        parser.add_argument('--decoder-ffn-embed-dim', type=int, metavar='N',
+                            help='decoder embedding dimension for FFN')
+        parser.add_argument('--decoder-layers', type=int, metavar='N',
+                            help='num decoder layers')
+        parser.add_argument('--decoder-attention-heads', type=int, metavar='N',
+                            help='num decoder attention heads')
+        parser.add_argument('--decoder-normalize-before', default=False, action='store_true',
+                            help='apply layernorm before each decoder block')
+        parser.add_argument('--adaptive-softmax-cutoff', metavar='EXPR',
+                            help='comma separated list of adaptive softmax cutoff points. '
+                                 'Must be used with adaptive_loss criterion')
+        parser.add_argument('--adaptive-softmax-dropout', type=float, metavar='D',
+                            help='sets adaptive softmax dropout for the tail projections')
+        parser.add_argument('--adaptive-softmax-factor', type=float, metavar='N',
+                            help='adaptive input factor')
+        parser.add_argument('--no-token-positional-embeddings', default=False, action='store_true',
+                            help='if set, disables positional embeddings (outside self attention)')
+        parser.add_argument('--share-decoder-input-output-embed', default=False, action='store_true',
+                            help='share decoder input and output embeddings')
+        parser.add_argument('--character-embeddings', default=False, action='store_true',
+                            help='if set, uses character embedding convolutions to produce token embeddings')
+        parser.add_argument('--character-filters', type=str, metavar='LIST',
+                            default='[(1, 64), (2, 128), (3, 192), (4, 256), (5, 256), (6, 256), (7, 256)]',
+                            help='size of character embeddings')
+        parser.add_argument('--character-embedding-dim', type=int, metavar='N', default=4,
+                            help='size of character embeddings')
+        parser.add_argument('--char-embedder-highway-layers', type=int, metavar='N', default=2,
+                            help='number of highway layers for character token embeddder')
+        parser.add_argument('--adaptive-input', action='store_true',
+                            help='if set, uses adaptive input')
+        parser.add_argument('--adaptive-input-factor', type=float, metavar='N',
+                            help='adaptive input factor')
+        parser.add_argument('--adaptive-input-cutoff', metavar='EXPR',
+                            help='comma separated list of adaptive input cutoff points.')
+        parser.add_argument('--tie-adaptive-weights', action='store_true',
+                            help='if set, ties the weights of adaptive softmax and adaptive input')
+        parser.add_argument('--tie-adaptive-proj', action='store_true',
+                            help='if set, ties the projection weights of adaptive softmax and adaptive input')
+        parser.add_argument('--decoder-learned-pos', action='store_true',
+                            help='use learned positional embeddings in the decoder')
+        # fmt: on
+
+        parser.add_argument('--max-relative-length', type=int, default=-1,
+                            help='the max relative length')
+
+        ### dense layer parameters
+        parser.add_argument('--encoder-history-type',
+                            help='encoder layer history type')
+        parser.add_argument('--decoder-history-type',
+                            help='decoder layer history type')
+        parser.add_argument('--encoder-integration-type', choices=['avg', 'sum'],
+                            help='encoder layer integration type')
+        parser.add_argument('--decoder-integration-type', choices=['avg', 'sum'],
+                            help='decoder layer integration type')
+        parser.add_argument('--enc-calculate-num', type=int, default=1,
+                            help='Number of calculations per encoder layer')
+    @classmethod
+    def build_model(cls, args, task):
+        """Build a new model instance."""
+
+        # make sure all arguments are present in older models
+        base_lm_architecture(args)
+
+        if hasattr(args, 'no_tie_adaptive_proj') and args.no_tie_adaptive_proj is False:
+            # backward compatibility
+            args.tie_adaptive_proj = True
+
+        if not hasattr(args, 'max_source_positions'):
+            args.max_source_positions = args.tokens_per_sample
+        if not hasattr(args, 'max_target_positions'):
+            args.max_target_positions = args.tokens_per_sample
+
+        if args.character_embeddings:
+            embed_tokens = CharacterTokenEmbedder(
+                task.dictionary, eval(args.character_filters),
+                args.character_embedding_dim, args.decoder_embed_dim,
+                args.char_embedder_highway_layers,
+            )
+        elif args.adaptive_input:
+            embed_tokens = AdaptiveInput(
+                len(task.dictionary), task.dictionary.pad(), args.decoder_input_dim,
+                args.adaptive_input_factor, args.decoder_embed_dim,
+                options.eval_str_list(args.adaptive_input_cutoff, type=int),
+            )
+        else:
+            embed_tokens = Embedding(len(task.dictionary), args.decoder_input_dim, task.dictionary.pad())
+
+        if args.tie_adaptive_weights:
+            assert args.adaptive_input
+            assert args.adaptive_input_factor == args.adaptive_softmax_factor
+            assert args.adaptive_softmax_cutoff == args.adaptive_input_cutoff, '{} != {}'.format(
+                args.adaptive_softmax_cutoff, args.adaptive_input_cutoff)
+            assert args.decoder_input_dim == args.decoder_output_dim
+
+        decoder = GroupShareTransformerDecoder(
+            args, task.output_dictionary, embed_tokens, no_encoder_attn=True, final_norm=False,
+        )
+        return GroupShareTransformerLanguageModel(decoder)
 
 class GroupShareTransformerEncoder(FairseqEncoder):
     """
@@ -209,6 +327,15 @@ class GroupShareTransformerEncoder(FairseqEncoder):
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
         self.calculate_num = args.enc_calculate_num
+        # self.noise = getattr(args, 'noise', False)
+        # self.noise_value = getattr(args, 'noise_value', 0.3)
+        # self.gate = Linear(embed_dim, embed_dim)
+        # self.sdu = Linear(embed_dim, embed_dim)
+        # self.gate_list = nn.ModuleList([])
+        # self.sdu_list = nn.ModuleList([])
+        # for _ in range (args.encoder_layers):
+        #     self.gate_list.extend(Linear(embed_dim, embed_dim))
+        #     self.sdu_list.extend(Linear(embed_dim, embed_dim))
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -376,6 +503,7 @@ class GroupShareTransformerDecoder(FairseqIncrementalDecoder):
         self.normalize = args.decoder_normalize_before and final_norm
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
+        self.calculate_num = getattr(args, 'dec_calculate_num', args.dec_calculate_num)
 
     def forward(self, prev_output_tokens, encoder_out=None, incremental_state=None):
         """
@@ -431,13 +559,14 @@ class GroupShareTransformerDecoder(FairseqIncrementalDecoder):
         for layer in self.layers:
             if self.history is not None:
                 x = self.history.pop()
-            x, attn = layer(
-                x,
-                encoder_out['encoder_out'] if encoder_out is not None else None,
-                encoder_out['encoder_padding_mask'] if encoder_out is not None else None,
-                incremental_state,
-                self_attn_mask=self.buffered_future_mask(x) if incremental_state is None else None,
-            )
+            for j in range(self.calculate_num):
+                x, attn = layer(
+                    x,
+                    encoder_out['encoder_out'] if encoder_out is not None else None,
+                    encoder_out['encoder_padding_mask'] if encoder_out is not None else None,
+                    incremental_state,
+                    self_attn_mask=self.buffered_future_mask(x) if incremental_state is None else None,
+                )
             inner_states.append(x)
             if self.history is not None:
                 self.history.add(x)
@@ -741,6 +870,75 @@ def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx, left_pad, le
 
 
 
+@register_model_architecture('group_share_transformer_lm', 'group_share_transformer_lm')
+def base_lm_architecture(args):
+    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
+    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 2048)
+    args.decoder_layers = getattr(args, 'decoder_layers', 6)
+    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 8)
+    args.adaptive_softmax_cutoff = getattr(args, 'adaptive_softmax_cutoff', None)
+    args.adaptive_softmax_dropout = getattr(args, 'adaptive_softmax_dropout', 0)
+    args.adaptive_softmax_factor = getattr(args, 'adaptive_softmax_factor', 4)
+    args.decoder_learned_pos = getattr(args, 'decoder_learned_pos', False)
+
+    args.character_embeddings = getattr(args, 'character_embeddings', False)
+
+    args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
+    args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
+
+    # The model training is not stable without this
+    args.decoder_normalize_before = True
+
+    args.adaptive_input = getattr(args, 'adaptive_input', False)
+    args.adaptive_input_factor = getattr(args, 'adaptive_input_factor', 4)
+    args.adaptive_input_cutoff = getattr(args, 'adaptive_input_cutoff', None)
+
+    args.tie_adaptive_weights = getattr(args, 'tie_adaptive_weights', False)
+    args.tie_adaptive_proj = getattr(args, 'tie_adaptive_proj', False)
+    args.max_relative_length = -1
+
+    args.encoder_history_type = getattr(args, 'encoder_history_type', 'dense')
+    args.decoder_history_type = getattr(args, 'decoder_history_type', 'dense')
+    args.encoder_integration_type = getattr(args, 'encoder_integration_type', 'avg')
+    args.decoder_integration_type = getattr(args, 'decoder_integration_type', 'avg')
+    args.enc_calculate_num = getattr(args, 'enc_calculate_num', 1)
+
+
+@register_model_architecture('group_share_transformer_lm', 'group_share_transformer_lm_big')
+def group_share_transformer_lm_big(args):
+    args.decoder_layers = getattr(args, 'decoder_layers', 12)
+    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1024)
+    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 4096)
+    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 16)
+    base_lm_architecture(args)
+
+
+@register_model_architecture('group_share_transformer_lm', 'group_share_transformer_lm_wiki103')
+def group_share_transformer_lm_wiki103(args):
+    args.decoder_layers = getattr(args, 'decoder_layers', 16)
+    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 8)
+    args.dropout = getattr(args, 'dropout', 0.3)
+    args.adaptive_input = getattr(args, 'adaptive_input', True)
+    args.tie_adaptive_weights = getattr(args, 'tie_adaptive_weights', True)
+    args.adaptive_input_cutoff = getattr(args, 'adaptive_input_cutoff', '20000,60000')
+    args.adaptive_softmax_cutoff = getattr(args, 'adaptive_softmax_cutoff', '20000,60000')
+    args.adaptive_softmax_dropout = getattr(args, 'adaptive_softmax_dropout', 0.2)
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_history_type = getattr(args, 'encoder_history_type', 'learnable_dense')
+    args.decoder_history_type = getattr(args, 'decoder_history_type', 'learnable_dense')
+    args.enc_calculate_num = 2
+    group_share_transformer_lm_big(args)
+
+
+@register_model_architecture('group_share_transformer_lm', 'group_share_transformer_lm_gbw')
+def group_share_transformer_lm_gbw(args):
+    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
+    args.dropout = getattr(args, 'dropout', 0.1)
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    group_share_transformer_lm_big(args)
+
+
 @register_model_architecture('group_share_transformer', 'group_share_transformer')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
@@ -775,7 +973,10 @@ def base_architecture(args):
     args.encoder_integration_type = getattr(args, 'encoder_integration_type', 'avg')
     args.decoder_integration_type = getattr(args, 'decoder_integration_type', 'avg')
     args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
-    args.enc_calculate_num = getattr(args, 'enc_calculate_num', args.enc_calculate_num)
+    args.enc_calculate_num = getattr(args, 'enc_calculate_num', 1)
+    args.dec_calculate_num = getattr(args, 'dec_calculate_num', 1)
+    # args.noise = getattr(args, 'noise', False)
+    # args.noise_value = getattr(args, 'noise_value', 0.3)
 
 
 @register_model_architecture('group_share_transformer', 'group_share_transformer_iwslt_de_en')
@@ -828,7 +1029,7 @@ def group_share_transformer_t2t_wmt_en_de(args):
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
     args.encoder_history_type = getattr(args, 'encoder_history_type', 'learnable_dense')
     args.decoder_history_type = getattr(args, 'decoder_history_type', 'learnable_dense')
-    args.encoder_layers = 25
+    args.encoder_layers = 6
     base_architecture(args)
 
 

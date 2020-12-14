@@ -14,9 +14,12 @@ from itertools import chain
 
 import torch
 
+
 from fairseq import distributed_utils, models, optim, utils
 from fairseq.meters import AverageMeter, StopwatchMeter, TimeMeter
 from fairseq.optim import lr_scheduler
+from fairseq.optim.utils import layers_grad_norm
+from fairseq.optim.utils import plot_layers_grad
 
 
 class Trainer(object):
@@ -104,6 +107,46 @@ class Trainer(object):
         params = []
         id_params = []
         # 获得每一层encoder_layer
+        #params.append({"params":torch.nn.ModuleList([self.model.encoder.]).parameters()})
+        en_embed_tokens = torch.nn.ModuleList([self.model.encoder.embed_tokens]).parameters()
+        en_embed_positions = torch.nn.ModuleList([self.model.encoder.embed_positions]).parameters()
+        en_layer_norm = torch.nn.ModuleList([self.model.encoder.layer_norm]).parameters()
+
+        de_embed_tokens = torch.nn.ModuleList([self.model.decoder.embed_tokens]).parameters()
+        de_embed_positions = torch.nn.ModuleList([self.model.decoder.embed_positions]).parameters()
+        de_layer_norm = torch.nn.ModuleList([self.model.decoder.layer_norm]).parameters()
+
+
+        other_join = []
+        for i in list(en_embed_tokens):
+            other_join.append(i)
+        for i in list(en_embed_positions):
+            other_join.append(i)
+        for i in list(en_layer_norm):
+            other_join.append(i)
+        for i in list(de_embed_tokens):
+            other_join.append(i)
+        for i in list(de_embed_positions):
+            other_join.append(i)
+        for i in list(de_layer_norm):
+            other_join.append(i)
+        params.append({"params": other_join})
+
+
+
+
+        for i in range(self.encoder_layer_num):
+            encoder = torch.nn.ModuleList([self.model.encoder.layers[i]]).parameters()
+            params.append({"params": list(encoder)})
+
+        # 获得每一层decoder_layer
+
+        for i in range(self.decoder_layer_num):
+            decoder = torch.nn.ModuleList([self.model.decoder.layers[i]]).parameters()
+            params.append({"params": list(decoder)})
+
+
+        '''
         for i in range(self.encoder_layer_num):
             encoder = filter(lambda p: id(p) in torch.nn.ModuleList([self.model.encoder.layers[i]]),
                              self.model.parameters())
@@ -119,6 +162,7 @@ class Trainer(object):
         # 获得其他层的参数
         base_params = filter(lambda p: id(p) not in id_params, self.model.parameters())
         params.append({"params": base_params})
+        '''
 
         if self.args.fp16:
             if self.cuda and torch.cuda.get_device_capability(0)[0] < 7:
@@ -239,6 +283,7 @@ class Trainer(object):
         if dummy_batch:
             return None
 
+
         # gather logging outputs from all replicas
         if self.args.distributed_world_size > 1:
             logging_outputs, sample_sizes, ooms, prev_norms = \
@@ -309,6 +354,24 @@ class Trainer(object):
 
         self.meters['train_wall'].stop()
 
+        # jing 计算每一层的grad范数
+        # 获得每一层encoder_layer
+        layers_norm = []
+        layer_norm = []
+        '''
+        for i in range(self.encoder_layer_num):
+            encoder = torch.nn.ModuleList([self.model.encoder.layers[i]]).parameters()
+            for j in list(encoder):
+                layer_norm.append(torch.norm(j).tolist())
+            layer_norm_np = np.array(layer_norm,dtype=float)
+            layer_norm_tensor = torch.from_numpy(layer_norm_np)
+            layers_norm.append(torch.norm(layer_norm_tensor).item())
+        print(layers_norm)
+        print("============")
+        '''
+        layers_norm = layers_grad_norm.get_layers_grad_norm(self.encoder_layer_num,self.model,0)
+        #print(layers_norm)
+        #plot_layers_grad.plot_layers_grad_norm(range(self.encoder_layer_num),layers_norm)
         return logging_output
 
     def valid_step(self, sample, raise_oom=False):

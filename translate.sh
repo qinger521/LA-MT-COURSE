@@ -4,14 +4,13 @@ set -e
 model_root_dir=checkpoints
 
 # set task
-#task=iwslt-de2en
-task=wmt-en2de
+task=iwslt-de2en
+#task=wmt-en2de
 
 # set tag
-model_dir_tag=base20-reg6_qk+1
-
+model_dir_tag=12_10_dlcl
 # set device
-gpu=5
+gpu=2
 cpu=
 
 # data set
@@ -21,7 +20,7 @@ who=test
 if [ $task == "iwslt-de2en" ]; then
         data_dir=iwslt14.tokenized.de-en
         ensemble=5
-        batch_size=128
+        batch_size=64
         beam=8
         length_penalty=1.6
         src_lang=de
@@ -59,7 +58,6 @@ else
         echo "unknown task=$task"
         exit
 fi
-
 model_dir=$model_root_dir/$task/$model_dir_tag
 
 checkpoint=checkpoint_best.pt

@@ -1,14 +1,14 @@
 import math
 import torch
 import torch.optim
-
+import numpy as np
 from fairseq.optim import FairseqOptimizer, register_optimizer
 
 def flatten_params(params):
     params_ = []
     params_out = []
     for p in params:
-        params_.append(list(p["params"]))
+        params_.append(p["params"])
     for p in params_:
         for p1 in p:
             params_out.append(p1)
@@ -84,6 +84,7 @@ class Depth_scale_Adam(torch.optim.Optimizer):
                         depth_scale=depth_scale,num_encoder_layers=num_encoder_layers)
         super(Depth_scale_Adam, self).__init__(params, defaults)
 
+
     def step(self, closure=None):
         """Performs a single optimization step.
 
@@ -96,6 +97,7 @@ class Depth_scale_Adam(torch.optim.Optimizer):
             loss = closure()
 
         for i, group in enumerate(self.param_groups):
+            up_rate = []
             # group['params'] = list(filter(lambda p: p.requires_grad, group['params']))
             num_of_encoder_layers = group['num_encoder_layers']
             if(i<=num_of_encoder_layers):
@@ -133,6 +135,7 @@ class Depth_scale_Adam(torch.optim.Optimizer):
                 # Decay the first and second moment running average coefficient
                 exp_avg.mul_(beta1).add_(1 - beta1, grad)
                 exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
+
                 if amsgrad:
                     # Maintains the maximum of all 2nd moment running avg. till now
                     torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
@@ -141,13 +144,19 @@ class Depth_scale_Adam(torch.optim.Optimizer):
                 else:
                     denom = exp_avg_sq.sqrt().add_(group['eps'])
 
+               
+
                 bias_correction1 = 1 - beta1 ** state['step']
                 bias_correction2 = 1 - beta2 ** state['step']
-                step_size = (group['lr']/(math.sqrt(j+1)*group['depth_scale'])) * math.sqrt(bias_correction2) / bias_correction1
+
+                step_size = (group['lr']*(group['depth_scale'])) * math.sqrt(bias_correction2) / bias_correction1
 
                 if group['weight_decay'] != 0:
-                    p.data.add_(-group['weight_decay'] * (group['lr']/(math.sqrt(j+1)*group['depth_scale'])), p.data)
+                    p.data.add_(-group['weight_decay'] * (group['lr']*(group['depth_scale'])), p.data)
 
+                # up_rate.append(torch.norm(exp_avg)/torch.norm(denom))
                 p.data.addcdiv_(-step_size, exp_avg, denom)
-
+            # print(up_rate)
+            # print(torch.norm(torch.from_numpy(np.array(up_rate))))
+            # print("==============layer update rate")
         return loss

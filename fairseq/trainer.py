@@ -19,6 +19,7 @@ from fairseq.meters import AverageMeter, StopwatchMeter, TimeMeter
 from fairseq.optim import lr_scheduler
 
 
+
 class Trainer(object):
     """Main class for data parallel training.
 
@@ -287,6 +288,8 @@ class Trainer(object):
 
         self.meters['train_wall'].stop()
 
+
+
         return logging_output
 
     def valid_step(self, sample, raise_oom=False):
@@ -345,6 +348,8 @@ class Trainer(object):
         self.meters['valid_loss'].update(logging_output.get('loss', 0), sample_size)
         if 'nll_loss' in logging_output:
             self.meters['valid_nll_loss'].update(logging_output.get('nll_loss', 0), ntokens)
+        #layers_norm = layers_grad_norm.get_layers_grad_norm(6, self.model, 0)
+        #print(layers_norm)
 
         return logging_output
 

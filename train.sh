@@ -1,47 +1,48 @@
 #! /usr/bin/bash
 set -e
 
-device=0,1,2,3,4,5,6,7
-#device=0
 
-#task=iwslt-de2en
+device=4
+encoder_layers=6
 task=wmt-en2de
+
 
 # must set this tag
 #tag=base-reg6-2_qkv_mean
-tag=base20-reg6_qk+1
+tag=wmt_basline
 if [ $task == "wmt-en2de" ]; then
-        arch=reg_transformer_t2t_wmt_en_de
+        arch=relative_transformer_t2t_wmt_en_de
         share_embedding=1
         share_decoder_input_output_embed=0
-        criterion=regularization_label_smoothed_cross_entropy
-        fp16=0
-        lr=0.002
-        warmup=16000
-        max_tokens=2048
-        update_freq=4
-        weight_decay=0.0
-        keep_last_epochs=10
-        max_epoch=21
-        max_update=
-        data_dir=iwslt14.tokenized.de-en
-        src_lang=en
-        tgt_lang=de
-elif [ $task == "ldc" ]; then
-        arch=transformer_t2t_wmt_en_de
-        share_embedding=0
-        share_decoder_input_output_embed=1
+        criterion=label_smoothed_cross_entropy
         fp16=1
         lr=0.002
-        warmup=8000
-        max_tokens=2048
-        update_freq=4
+        warmup=16000
+        max_tokens=4096
+        update_freq=2
         weight_decay=0.0
-        keep_last_epochs=10
-        max_epoch=16
+        keep_last_epochs=20
+        max_epoch=21
         max_update=
-        data_dir=LDC_180W
-        src_lang=zh
+        data_dir=wmt_17
+        src_lang=en
+        tgt_lang=de
+elif [ $task == "iwslt-de2en" ]; then
+        arch=heterogeneous_dense_transformer_iwslt_de_en
+        share_embedding=1
+        share_decoder_input_output_embed=0
+ 	criterion=label_smoothed_cross_entropy
+        fp16=0
+        lr=0.0015
+        warmup=8000
+        max_tokens=4096
+        update_freq=1
+        weight_decay=0.0001
+        keep_last_epochs=10
+        max_epoch=51
+        max_update=
+        data_dir=iwslt14.tokenized.de-en
+        src_lang=de
         tgt_lang=en
 else
         echo "unknown task=$task"
@@ -57,24 +58,26 @@ cp ${BASH_SOURCE[0]} $save_dir/train.sh
 
 gpu_num=`echo "$device" | awk '{split($0,arr,",");print length(arr)}'`
 
-cmd="python3 -u train.py data-bin/$data_dir
+cmd="/home/jingyi/Python-3.6.7/bin/python3 -u train.py data-bin/$data_dir
   --distributed-world-size $gpu_num -s $src_lang -t $tgt_lang
   --arch $arch
   --optimizer adam --clip-norm 0.0
   --lr-scheduler inverse_sqrt --warmup-init-lr 1e-07 --warmup-updates $warmup
   --lr $lr --min-lr 1e-09
   --weight-decay $weight_decay
+  --encoder-layers $encoder_layers
   --criterion $criterion  --label-smoothing 0.1
   --max-tokens $max_tokens
   --update-freq $update_freq
   --no-progress-bar
   --log-interval 100
-  --ddp-backend no_c10d 
+  --ddp-backend no_c10d
+  --seed 1 
   --save-dir $save_dir
   --keep-last-epochs $keep_last_epochs
   --tensorboard-logdir $save_dir"
 
-adam_betas="'(0.9, 0.997)'"
+adam_betas="'(0.9, 0.98)'"
 cmd=${cmd}" --adam-betas "${adam_betas}
 if [ $share_embedding -eq 1 ]; then
 cmd=${cmd}" --share-all-embeddings "

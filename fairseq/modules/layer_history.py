@@ -19,6 +19,8 @@ def CreateLayerHistory(args, is_encoder):
         return LearnableDenseMaskLayerHistory(args, is_encoder)
     elif history_type == "learnable_dense_nonorm":
         return LearnableDenseNoNormLayerHistory(args, is_encoder)
+    elif history_type == "gru":
+        return GruLayerHistory(args, is_encoder)
     else:
         raise ValueError
 
@@ -282,3 +284,34 @@ class LearnableDenseNoNormLayerHistory(BaseLayerHistory):
         self.sum = None
         self.count = 0
         self.layers = []
+
+
+class GruLayerHistory(BaseLayerHistory):
+    """
+    x_n = (x_1 + y_1 + y_2 + ... y_{n-1}) / n
+    """
+
+    def __init__(self, args, is_encoder):
+        super(GruLayerHistory, self).__init__(args, is_encoder)
+        self.count = 0
+        self.gru = nn.GRUCell(args.encoder_embed_dim, args.encoder_embed_dim)
+        self.gru_cells = []
+        self.layer_norms = nn.ModuleList(LayerNorm(args.encoder_embed_dim) for _ in range(args.decoder_layers))
+
+    def compute_gru(self, layer_output):
+        if self.count == 0:
+            self.gru_cells.append(layer_output)
+            return self.layer_norms[self.count](layer_output)
+
+        self.count += 1
+        prev_h = self.gru_cells[-1]
+        L, B, H = layer_output.size()
+        layer_output = torch.reshape(layer_output, (-1, H))
+        prev_h = torch.reshape(prev_h, (-1, H))
+        h = self.gru(layer_output, prev_h).view(L, B, H)
+        self.gru_cells.append(h)
+        return self.layer_norms[self.count](h)
+
+    def clean(self):
+        self.gru_cells = []
+        self.count = 0

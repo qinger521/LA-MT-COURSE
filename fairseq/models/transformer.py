@@ -23,6 +23,10 @@ from . import (
     FairseqModel, register_model, register_model_architecture,
 )
 
+import numpy as np
+
+np.set_printoptions(threshold=np.inf)
+np.set_printoptions(linewidth=np.inf)
 
 @register_model('transformer')
 class TransformerModel(FairseqModel):
@@ -326,18 +330,49 @@ class TransformerEncoder(FairseqEncoder):
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
         if not encoder_padding_mask.any():
             encoder_padding_mask = None
-
+        #print("emb:{}".format(x.size()))
+        
+        #intra_sim
+        attn_weight_list = []
+        # inner_states=[x]
         # encoder layers
-        for layer in self.layers:
-            x = layer(x, encoder_padding_mask)
+        for layer_id,layer in enumerate(self.layers):
+            #if layer_id == 2 :
+                #continue
+            x, attn_weight = layer(x, encoder_padding_mask)
+            attn_weight_list.append(attn_weight)
+            # inner_states.append(x)
 
         if self.normalize:
             x = self.layer_norm(x)
 
+        #self.print_attn_weight(attn_weight_list)
+        #print("encoder-out:{}".format(x))
         return {
             'encoder_out': x,  # T x B x C
             'encoder_padding_mask': encoder_padding_mask,  # B x T
         }
+ 
+    def L2_norm(self, inner_states):
+        length, batch, hidden = inner_states[0].size()
+        norm_list = []
+        if not self.training and batch == 1:
+            i = 1
+            while i <= len(inner_states)-2:
+                temp = (inner_states[i] - inner_states[i+1]).view(length,hidden)
+                norm = torch.norm(temp,p=2)
+                norm_list.append(norm)
+                i+=1
+        for i in norm_list:
+            print(float(i))
+
+    def print_attn_weight(self, attn_weight_list):
+        for layer_id, tensor in enumerate(attn_weight_list):
+            with open('attn_weight', 'a') as f:
+                f.write(str(layer_id))
+                f.write('\n')
+                f.write(str(tensor.cpu().numpy()))
+                f.write('\n')
 
     def reorder_encoder_out(self, encoder_out, new_order):
         """
@@ -492,9 +527,10 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         attn = None
 
         inner_states = [x]
+        enc_dec_attn_weight_list = []
 
         # decoder layers
-        for layer in self.layers:
+        for layer_id,layer in enumerate(self.layers):
             x, attn = layer(
                 x,
                 encoder_out['encoder_out'] if encoder_out is not None else None,
@@ -503,10 +539,14 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 self_attn_mask=self.buffered_future_mask(x) if incremental_state is None else None,
             )
             inner_states.append(x)
+            enc_dec_attn_weight_list.append(attn)
+        #for i in range(len(enc_dec_attn_weight_list)):
+            #print('layer{}'.format(i))
+            #print(enc_dec_attn_weight_list[i].cpu().numpy())
 
         if self.normalize:
             x = self.layer_norm(x)
-
+        # print("decoder-out:{}".format(x))
         # T x B x C -> B x T x C
         x = x.transpose(0, 1)
 
@@ -521,6 +561,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 x = F.linear(x, self.embed_out)
 
         return x, {'attn': attn, 'inner_states': inner_states}
+        #return x,attn
 
     def max_positions(self):
         """Maximum output length supported by the decoder."""
@@ -614,7 +655,8 @@ class TransformerEncoderLayer(nn.Module):
         """
         residual = x
         x = self.maybe_layer_norm(0, x, before=True)
-        x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
+        #print("input:{}".format(x))
+        x, attn_weight = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
         x = self.maybe_layer_norm(0, x, after=True)
@@ -627,7 +669,7 @@ class TransformerEncoderLayer(nn.Module):
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
         x = self.maybe_layer_norm(1, x, after=True)
-        return x
+        return x, attn_weight
 
     def maybe_layer_norm(self, i, x, before=False, after=False):
         assert before ^ after
@@ -745,7 +787,8 @@ class TransformerDecoderLayer(nn.Module):
                 key_padding_mask=encoder_padding_mask,
                 incremental_state=incremental_state,
                 static_kv=True,
-                need_weights=(not self.training and self.need_attn),
+                need_weights=True,
+                #need_weights=(not self.training and self.need_attn),
             )
             x = F.dropout(x, p=self.dropout, training=self.training)
             x = residual + x
@@ -889,7 +932,8 @@ def base_architecture(args):
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
     args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
-    args.k_only = getattr(args, 'k_only', args.k_only)
+    #args.k_only = getattr(args, 'k_only', args.k_only)
+    args.k_only = True
 
 @register_model_architecture('transformer', 'transformer_iwslt_de_en')
 def transformer_iwslt_de_en(args):
@@ -903,9 +947,21 @@ def transformer_iwslt_de_en(args):
     args.decoder_layers = getattr(args, 'decoder_layers', 6)
     base_architecture(args)
 
+@register_model_architecture('transformer', 'transformer_t2t_iwslt_de_en')
+def transformer_t2t_iwslt_de_en(args):
+    args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', True)
+    args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', True)
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.dropout = getattr(args, 'dropout', 0.3)
+    args.encoder_layers = getattr(args, 'encoder_layers', 6)
+    transformer_iwslt_de_en(args)
+
 
 @register_model_architecture('transformer', 'transformer_wmt_en_de')
 def transformer_wmt_en_de(args):
+    #args.encoder_learned_pos = True
+    #args.decoder_learned_pos = True
     base_architecture(args)
 
 
@@ -915,8 +971,19 @@ def transformer_t2t_wmt_en_de(args):
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = 6
+    args.decoder_layers = 6
     base_architecture(args)
 
+@register_model_architecture('transformer', 'transformer_t2t_wmt_en_de_24l')
+def transformer_t2t_wmt_en_de(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = 24
+    args.decoder_layers = 6
+    base_architecture(args)
 
 @register_model_architecture('transformer', 'relative_transformer_wmt_en_de')
 def relative_transformer_wmt_en_de(args):
@@ -931,7 +998,8 @@ def relative_transformer_t2t_wmt_en_de(args):
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.encoder_layers = 40
+    args.encoder_layers = 48
+    args.decoder_layers = 6
     args.max_relative_length = 8
     args.k_only = True
     base_architecture(args)
@@ -970,22 +1038,64 @@ def transformer_wmt_en_de_big_t2t(args):
     args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', True)
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = 12
+    args.decoder_layers = 6
     transformer_vaswani_wmt_en_de_big(args)
 
+# default parameters used in tensor2tensor implementation
+@register_model_architecture('transformer', 't2t_transformer_vaswani_wmt_en_de_big')
+def t2t_transformer_vaswani_wmt_en_de_big(args):
+    args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', True)
+    args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', True)
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    transformer_vaswani_wmt_en_de_big(args)
 
-@register_model_architecture('transformer', 'relative_transformer_test')
-def relative_transformer_test(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 64)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 256)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
-    args.encoder_layers = getattr(args, 'encoder_layers', 4)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 64)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 256)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
-    args.decoder_layers = getattr(args, 'decoder_layers', 4)
+# default parameters used in tensor2tensor implementation
+@register_model_architecture('transformer', 'relative_transformer_t2t_wmt_en_de_big')
+def relative_transformer_t2t_wmt_en_de_big(args):
+    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 1024)
+    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 4096)
+    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 16)
+    args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', False)
+    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1024)
+    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 4096)
+    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 16)
+    args.dropout = getattr(args, 'dropout', 0.3)
+    relative_transformer_t2t_wmt_en_de(args)
+
+@register_model_architecture('transformer', 'transformer_t2t_wmt_en_de_48l')
+def transformer_t2t_wmt_en_de_48l(args):
     args.encoder_normalize_before = True
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.max_relative_length = 20
+    args.encoder_layers = getattr(args, 'encoder_layers', 48)
+    base_architecture(args)
+
+@register_model_architecture('transformer', 'transformer_t2t_wmt_en_de_6l')
+def transformer_t2t_wmt_en_de_6l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 6)
+    base_architecture(args)
+
+@register_model_architecture('transformer', 'transformer_t2t_wmt_en_de_12l')
+def transformer_t2t_wmt_en_de_12l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 12)
+    base_architecture(args)
+
+@register_model_architecture('transformer', 'transformer_t2t_wmt_en_de_18l')
+def transformer_t2t_wmt_en_de_18l(args):
+    args.encoder_normalize_before = True
+    args.decoder_normalize_before = True
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
+    args.encoder_layers = getattr(args, 'encoder_layers', 18)
     base_architecture(args)

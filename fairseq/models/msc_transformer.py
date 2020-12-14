@@ -29,8 +29,8 @@ from . import (
 from fairseq.modules.layer_history import CreateLayerHistory
 
 
-@register_model('heterogeneous_dense_transformer')
-class HeterogeneousDenseTransformerModel(FairseqModel):
+@register_model('msc_transformer')
+class MultiscaleCollaborativeTransformerModel(FairseqModel):
     """
     Transformer model from `"Attention Is All You Need" (Vaswani, et al, 2017)
     <https://arxiv.org/abs/1706.03762>`_.
@@ -160,13 +160,13 @@ class HeterogeneousDenseTransformerModel(FairseqModel):
                 tgt_dict, args.decoder_embed_dim, args.decoder_embed_path
             )
 
-        encoder = HeterogeneousDenseTransformerEncoder(args, src_dict, encoder_embed_tokens)
-        decoder = HeterogeneousDenseTransformerDecoder(args, tgt_dict, decoder_embed_tokens)
-        return HeterogeneousDenseTransformerModel(encoder, decoder)
+        encoder = MultiscaleCollaborativeTransformerEncoder(args, src_dict, encoder_embed_tokens)
+        decoder = MultiscaleCollaborativeTransformerDecoder(args, tgt_dict, decoder_embed_tokens)
+        return MultiscaleCollaborativeTransformerModel(encoder, decoder)
 
 
 
-class HeterogeneousDenseTransformerEncoder(FairseqEncoder):
+class MultiscaleCollaborativeTransformerEncoder(FairseqEncoder):
     """
     Transformer encoder consisting of *args.encoder_layers* layers. Each layer
     is a :class:`TransformerEncoderLayer`.
@@ -199,16 +199,15 @@ class HeterogeneousDenseTransformerEncoder(FairseqEncoder):
         self.history = CreateLayerHistory(args, is_encoder=True)
         self.layers = nn.ModuleList([])
         self.layers.extend([
-            TransformerEncoderLayer(args)
+            MultiscaleCollaborativeTransformerEncoderLayer(args)
             for i in range(args.encoder_layers)
         ])
         self.register_buffer('version', torch.Tensor([2]))
         self.normalize = args.encoder_normalize_before
-        if self.normalize:
-            self.layer_norm = LayerNorm(args.decoder_embed_dim)
 
-        self.fc1 = Linear(args.encoder_embed_dim, args.encoder_to_decoder_dim)
-        self.fc2 = Linear(args.encoder_to_decoder_dim, args.decoder_embed_dim)
+        self.encoder_blocks = int(args.encoder_layers / args.decoder_layers)
+        self.decoder_layers = args.decoder_layers
+        self.encoder_out = []
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -225,8 +224,8 @@ class HeterogeneousDenseTransformerEncoder(FairseqEncoder):
                 - **encoder_padding_mask** (ByteTensor): the positions of
                   padding elements of shape `(batch, src_len)`
         """
-        if self.history is not None:
-            self.history.clean()
+        self.history.clean()
+        self.encoder_out = []
         # embed tokens and positions
         x = self.embed_scale * self.embed_tokens(src_tokens)
         if self.embed_positions is not None:
@@ -236,36 +235,23 @@ class HeterogeneousDenseTransformerEncoder(FairseqEncoder):
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 
-        # add emb into history
-        if self.history is not None:
-            self.history.add(x)
-
+        context = self.history.compute_gru(x)
         # compute padding mask
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
         if not encoder_padding_mask.any():
             encoder_padding_mask = None
 
         # encoder layers
-        for layer in self.layers:
-            if self.history is not None:
-                x = self.history.pop()
-            x = layer(x, encoder_padding_mask)
-            if self.history is not None:
-                self.history.add(x)
-
-        if self.history is not None:
-            x = self.history.pop()
-
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
-
-        if self.normalize:
-            x = self.layer_norm(x)
+        for layer_num, layer in enumerate(self.layers):
+            x = layer(x, context, encoder_padding_mask)
+            if self.history is not None and (layer_num+1) % self.encoder_blocks == 0:
+                context = self.history.compute_gru(x)
+                self.encoder_out.append(x)
 
         return {
-            'encoder_out': x,  # T x B x C
+            'encoder_out': self.encoder_out,  # T x B x C
             'encoder_padding_mask': encoder_padding_mask,  # B x T
+            'gru_cells': self.history.gru_cells, # len(gru_cells) * T x B x C
         }
 
     def reorder_encoder_out(self, encoder_out, new_order):
@@ -280,11 +266,14 @@ class HeterogeneousDenseTransformerEncoder(FairseqEncoder):
             *encoder_out* rearranged according to *new_order*
         """
         if encoder_out['encoder_out'] is not None:
-            encoder_out['encoder_out'] = \
-                encoder_out['encoder_out'].index_select(1, new_order)
+            for index in range(self.decoder_layers):
+                encoder_out['encoder_out'][index] = encoder_out['encoder_out'][index].index_select(1, new_order)
         if encoder_out['encoder_padding_mask'] is not None:
             encoder_out['encoder_padding_mask'] = \
                 encoder_out['encoder_padding_mask'].index_select(0, new_order)
+        if encoder_out['gru_cells'] is not None:
+            for index in range(self.decoder_layers + 1):
+                encoder_out['gru_cells'][index] = encoder_out['gru_cells'][index].index_select(1, new_order)
         return encoder_out
 
     def max_positions(self):
@@ -309,7 +298,7 @@ class HeterogeneousDenseTransformerEncoder(FairseqEncoder):
         return state_dict
 
 
-class HeterogeneousDenseTransformerDecoder(FairseqIncrementalDecoder):
+class MultiscaleCollaborativeTransformerDecoder(FairseqIncrementalDecoder):
     """
     Transformer decoder consisting of *args.decoder_layers* layers. Each layer
     is a :class:`TransformerDecoderLayer`.
@@ -349,11 +338,9 @@ class HeterogeneousDenseTransformerDecoder(FairseqIncrementalDecoder):
             learned=args.decoder_learned_pos,
         ) if not args.no_token_positional_embeddings else None
 
-        # create decoder layer history
-        self.history = CreateLayerHistory(args, is_encoder=False)
         self.layers = nn.ModuleList([])
         self.layers.extend([
-            TransformerDecoderLayer(args, no_encoder_attn)
+            MultiscaleCollaborativeTransformerDecoderLayer(args, no_encoder_attn)
             for _ in range(args.decoder_layers)
         ])
 
@@ -398,8 +385,6 @@ class HeterogeneousDenseTransformerDecoder(FairseqIncrementalDecoder):
                   tgt_len, src_len)`
         """
         # embed positions
-        if self.history is not None:
-            self.history.clean()
         positions = self.embed_positions(
             prev_output_tokens,
             incremental_state=incremental_state,
@@ -426,27 +411,18 @@ class HeterogeneousDenseTransformerDecoder(FairseqIncrementalDecoder):
 
         inner_states = [x]
 
-        # add emb into history
-        if self.history is not None:
-            self.history.add(x)
 
         # decoder layers
-        for layer in self.layers:
-            if self.history is not None:
-                x = self.history.pop()
+        for layer_num, layer in enumerate(self.layers):
             x, attn = layer(
                 x,
-                encoder_out['encoder_out'] if encoder_out is not None else None,
+                encoder_out['encoder_out'][layer_num] if encoder_out is not None else None,
                 encoder_out['encoder_padding_mask'] if encoder_out is not None else None,
+                encoder_out['gru_cells'][layer_num+1] if encoder_out is not None else None,
                 incremental_state,
                 self_attn_mask=self.buffered_future_mask(x) if incremental_state is None else None,
             )
             inner_states.append(x)
-            if self.history is not None:
-                self.history.add(x)
-
-        if self.history is not None:
-            x = self.history.pop()
 
         if self.normalize:
             x = self.layer_norm(x)
@@ -510,7 +486,7 @@ class HeterogeneousDenseTransformerDecoder(FairseqIncrementalDecoder):
         return state_dict
 
 
-class TransformerEncoderLayer(nn.Module):
+class MultiscaleCollaborativeTransformerEncoderLayer(nn.Module):
     """Encoder layer block.
 
     In the original paper each operation (multi-head attention or FFN) is
@@ -538,14 +514,26 @@ class TransformerEncoderLayer(nn.Module):
                 self.embed_dim, args.encoder_attention_heads,
                 args.max_relative_length, dropout=args.attention_dropout,
             )
+
+        self.context_attn = MultiheadAttention(
+            self.embed_dim, args.encoder_attention_heads,
+            dropout=args.attention_dropout,
+        )
+        self.context_attn_layer_norm = LayerNorm(self.embed_dim)
+        self.w1 = Linear(self.embed_dim, self.embed_dim)
+        self.w2 = Linear(self.embed_dim, self.embed_dim, bias=False)
+
         self.dropout = args.dropout
         self.relu_dropout = args.relu_dropout
         self.normalize_before = args.encoder_normalize_before
         self.fc1 = Linear(self.embed_dim, args.encoder_ffn_embed_dim)
         self.fc2 = Linear(args.encoder_ffn_embed_dim, self.embed_dim)
-        self.layer_norms = nn.ModuleList([LayerNorm(self.embed_dim) for i in range(2)])
+        self.self_attn_layer_norm = LayerNorm(self.embed_dim)
+        self.final_layer_norm = LayerNorm(self.embed_dim)
 
-    def forward(self, x, encoder_padding_mask):
+
+
+    def forward(self, x, context, encoder_padding_mask):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -556,31 +544,35 @@ class TransformerEncoderLayer(nn.Module):
             encoded output of shape `(batch, src_len, embed_dim)`
         """
         residual = x
-        x = self.maybe_layer_norm(0, x, before=True)
-        x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        x = residual + x
-        x = self.maybe_layer_norm(0, x, after=True)
+        x = self.maybe_layer_norm(self.self_attn_layer_norm, x, before=True)
+        self_attn, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
+        self_attn = F.dropout(self_attn, p=self.dropout, training=self.training)
+
+        context = self.maybe_layer_norm(self.context_attn_layer_norm, context, before=True)
+        context_attn, _ = self.context_attn(query=x, key=context, value=context, key_padding_mask=encoder_padding_mask)
+        context_attn = F.dropout(context_attn, p=self.dropout, training=self.training)
+
+        gate = torch.sigmoid(self.w1(self_attn) + self.w2(context_attn))
+        x = self_attn * gate + context_attn * (1 - gate) + residual
 
         residual = x
-        x = self.maybe_layer_norm(1, x, before=True)
+        x = self.maybe_layer_norm(self.final_layer_norm, x, before=True)
         x = F.relu(self.fc1(x))
         x = F.dropout(x, p=self.relu_dropout, training=self.training)
         x = self.fc2(x)
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
-        x = self.maybe_layer_norm(1, x, after=True)
         return x
 
-    def maybe_layer_norm(self, i, x, before=False, after=False):
+    def maybe_layer_norm(self, layer_norm, x, before=False, after=False):
         assert before ^ after
         if after ^ self.normalize_before:
-            return self.layer_norms[i](x)
+            return layer_norm(x)
         else:
             return x
 
 
-class TransformerDecoderLayer(nn.Module):
+class MultiscaleCollaborativeTransformerDecoderLayer(nn.Module):
     """Decoder layer block.
 
     In the original paper each operation (multi-head attention, encoder
@@ -616,6 +608,15 @@ class TransformerDecoderLayer(nn.Module):
 
         self.self_attn_layer_norm = LayerNorm(self.embed_dim)
 
+        self.context_attn = MultiheadAttention(
+            self.embed_dim, args.encoder_attention_heads,
+            dropout=args.attention_dropout,
+        )
+        self.context_attn_layer_norm = LayerNorm(self.embed_dim)
+        self.encoder_out_layer_norm = LayerNorm(self.embed_dim)
+        self.w1 = Linear(self.embed_dim, self.embed_dim)
+        self.w2 = Linear(self.embed_dim, self.embed_dim, bias=False)
+
         if no_encoder_attn:
             self.encoder_attn = None
             self.encoder_attn_layer_norm = None
@@ -637,7 +638,7 @@ class TransformerDecoderLayer(nn.Module):
     def prepare_for_onnx_export_(self):
         self.onnx_trace = True
 
-    def forward(self, x, encoder_out, encoder_padding_mask, incremental_state,
+    def forward(self, x, encoder_out, encoder_padding_mask, gru_cell, incremental_state,
                 prev_self_attn_state=None, prev_attn_state=None, self_attn_mask=None,
                 self_attn_padding_mask=None):
         """
@@ -668,19 +669,19 @@ class TransformerDecoderLayer(nn.Module):
         )
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
-        x = self.maybe_layer_norm(self.self_attn_layer_norm, x, after=True)
 
         attn = None
         if self.encoder_attn is not None:
             residual = x
             x = self.maybe_layer_norm(self.encoder_attn_layer_norm, x, before=True)
+            encoder_out = self.maybe_layer_norm(self.encoder_out_layer_norm, encoder_out, before=True)
             if prev_attn_state is not None:
                 if incremental_state is None:
                     incremental_state = {}
                 prev_key, prev_value = prev_attn_state
                 saved_state = {"prev_key": prev_key, "prev_value": prev_value}
                 self.encoder_attn._set_input_buffer(incremental_state, saved_state)
-            x, attn = self.encoder_attn(
+            encdec_attn, attn = self.encoder_attn(
                 query=x,
                 key=encoder_out,
                 value=encoder_out,
@@ -689,9 +690,22 @@ class TransformerDecoderLayer(nn.Module):
                 static_kv=True,
                 need_weights=(not self.training and self.need_attn),
             )
-            x = F.dropout(x, p=self.dropout, training=self.training)
-            x = residual + x
-            x = self.maybe_layer_norm(self.encoder_attn_layer_norm, x, after=True)
+            encdec_attn = F.dropout(encdec_attn, p=self.dropout, training=self.training)
+
+            gru_cell = self.maybe_layer_norm(self.context_attn_layer_norm, gru_cell, before= True)
+            context_attn, attn_ctx = self.context_attn(
+                query=x,
+                key=gru_cell,
+                value=gru_cell,
+                key_padding_mask=encoder_padding_mask,
+                incremental_state=incremental_state,
+                static_kv=True,
+                need_weights=(not self.training and self.need_attn),
+            )
+            context_attn = F.dropout(context_attn, p=self.dropout, training=self.training)
+
+            gate = torch.sigmoid(self.w1(encdec_attn) + self.w2(context_attn))
+            x = encdec_attn * gate + context_attn * (1 - gate) + residual
 
         residual = x
         x = self.maybe_layer_norm(self.final_layer_norm, x, before=True)
@@ -700,7 +714,6 @@ class TransformerDecoderLayer(nn.Module):
         x = self.fc2(x)
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
-        x = self.maybe_layer_norm(self.final_layer_norm, x, after=True)
         if self.onnx_trace:
             saved_state = self.self_attn._get_input_buffer(incremental_state)
             self_attn_state = saved_state["prev_key"], saved_state["prev_value"]
@@ -744,7 +757,7 @@ def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx, left_pad, le
 
 
 
-@register_model_architecture('heterogeneous_dense_transformer', 'heterogeneous_dense_transformer')
+@register_model_architecture('msc_transformer', 'msc_transformer')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -773,107 +786,40 @@ def base_architecture(args):
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
 
-    args.encoder_history_type = getattr(args, 'encoder_history_type', 'dense')
-    args.decoder_history_type = getattr(args, 'decoder_history_type', 'dense')
+    args.encoder_history_type = getattr(args, 'encoder_history_type', 'gru')
+    args.decoder_history_type = getattr(args, 'decoder_history_type', 'gru')
     args.encoder_integration_type = getattr(args, 'encoder_integration_type', 'avg')
     args.decoder_integration_type = getattr(args, 'decoder_integration_type', 'avg')
     args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
 
 
-
-@register_model_architecture('heterogeneous_dense_transformer', 'heterogeneous_dense_transformer_wmt_en_de')
-def heterogeneous_dense_transformer_wmt_en_de(args):
-    args.encoder_history_type = getattr(args, 'encoder_history_type', 'learnable_dense')
-    args.decoder_history_type = getattr(args, 'decoder_history_type', 'learnable_dense')
+@register_model_architecture('msc_transformer', 'msc_transformer_wmt_en_de')
+def msc_transformer_wmt_en_de(args):
     args.encoder_layers = 25
     base_architecture(args)
 
 
 
-@register_model_architecture('heterogeneous_dense_transformer', 'heterogeneous_dense_transformer_t2t_wmt_en_de')
-def heterogeneous_dense_transformer_t2t_wmt_en_de(args):
+@register_model_architecture('msc_transformer', 'msc_transformer_t2t_wmt_en_de')
+def msc_transformer_t2t_wmt_en_de(args):
     args.encoder_normalize_before = True
     args.decoder_normalize_before = True
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.encoder_history_type = getattr(args, 'encoder_history_type', 'learnable_dense')
-    args.decoder_history_type = getattr(args, 'decoder_history_type', 'learnable_dense')
-    args.encoder_layers = 25
+    args.encoder_layers = 36
     base_architecture(args)
 
 
-
-@register_model_architecture('heterogeneous_dense_transformer', 'heterogeneous_dense_relative_transformer_wmt_en_de')
-def heterogeneous_dense_relative_transformer_wmt_en_de(args):
-    args.max_relative_length = 20
-    args.encoder_layers = 6
-    base_architecture(args)
-
-
-'''
-@register_model_architecture('heterogeneous_dense_transformer', 'heterogeneous_dense_relative_transformer_t2t_wmt_en_de')
-def heterogeneous_dense_relative_transformer_t2t_wmt_en_de(args):
-    args.encoder_normalize_before = True
-    args.decoder_normalize_before = True
-    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.encoder_history_type = getattr(args, 'encoder_history_type', 'learnable_dense')
-    args.decoder_history_type = getattr(args, 'decoder_history_type', 'learnable_dense')
-    args.max_relative_length = 20
-    args.encoder_layers = 6
-    base_architecture(args)
-'''
-
-@register_model_architecture('heterogeneous_dense_transformer', 'heterogeneous_dense_relative_transformer_t2t_wmt_en_de')
-def heterogeneous_dense_relative_transformer_t2t_wmt_en_de(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 768)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 3072)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 12)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 2048)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 8)
-    args.encoder_to_decoder_dim = getattr(args, 'encoder_to_decoder_dim', 3072)
-    args.dropout = getattr(args, 'dropout', 0.1)
-    args.encoder_normalize_before = True
-    args.decoder_normalize_before = True
-    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    args.encoder_layers = 30
+@register_model_architecture('msc_transformer', 'msc_relative_transformer_wmt_en_de')
+def msc_relative_transformer_wmt_en_de(args):
     args.max_relative_length = 8
-    base_architecture(args)
+    args.encoder_layers = 6
+    msc_transformer_wmt_en_de(args)
 
-@register_model_architecture('heterogeneous_dense_transformer', 'heterogeneous_dense_transformer_iwslt_de_en')
-def base_architecture(args):
-    args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
-    args.encoder_layers = getattr(args, 'encoder_layers', 6)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
-    args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', False)
-    args.encoder_learned_pos = getattr(args, 'encoder_learned_pos', False)
-    args.decoder_embed_path = getattr(args, 'decoder_embed_path', None)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', args.encoder_embed_dim)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', args.encoder_ffn_embed_dim)
-    args.decoder_layers = getattr(args, 'decoder_layers', 6)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
-    args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', False)
-    args.decoder_learned_pos = getattr(args, 'decoder_learned_pos', False)
-    args.attention_dropout = getattr(args, 'attention_dropout', 0.)
-    args.relu_dropout = getattr(args, 'relu_dropout', 0.)
-    args.dropout = getattr(args, 'dropout', 0.1)
-    args.adaptive_softmax_cutoff = getattr(args, 'adaptive_softmax_cutoff', None)
-    args.adaptive_softmax_dropout = getattr(args, 'adaptive_softmax_dropout', 0)
-    args.share_decoder_input_output_embed = getattr(args, 'share_decoder_input_output_embed', False)
-    args.share_all_embeddings = getattr(args, 'share_all_embeddings', False)
-    args.no_token_positional_embeddings = getattr(args, 'no_token_positional_embeddings', False)
-    args.adaptive_input = getattr(args, 'adaptive_input', False)
-    args.encoder_to_decoder_dim = getattr(args, 'encoder_to_decoder_dim', 1024)
 
-    args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
-    args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
 
-    args.encoder_history_type = getattr(args, 'encoder_history_type', 'dense')
-    args.decoder_history_type = getattr(args, 'decoder_history_type', 'dense')
-    args.encoder_integration_type = getattr(args, 'encoder_integration_type', 'avg')
-    args.decoder_integration_type = getattr(args, 'decoder_integration_type', 'avg')
-    args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
+@register_model_architecture('msc_transformer', 'msc_relative_transformer_t2t_wmt_en_de')
+def msc_relative_transformer_t2t_wmt_en_de(args):
+    args.max_relative_length = 8
+    args.encoder_layers = 12
+    msc_transformer_t2t_wmt_en_de(args)
