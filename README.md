@@ -55,15 +55,15 @@ bash train.sh
 # 实验结果
 ## 基于门控的encoder-decoder间信息融合 & encoder层内基于attention机制的信息融合
 # | Model |  De -> En |
--|-|-
+--|--|--
 1|Baseline|35.81
 2|Gate_encoder_decoder|36.75
 3|layer attention|33.81
 
 注：baseline为transformer_t2t_iwslt_de_en
 ## layer-wise Adam优化器
-# | 更新策略 |  意义 | 是否收敛 | 各层梯度方差变化情况 |bleu
--|-|-|-|-|-
+#| 更新策略 |  意义 | 是否收敛 | 各层梯度方差变化情况 |bleu
+--|--|--|--|--|--
 1|lr|每一层更新步长为相同学习率|是|1612->39742|35.40
 2|lr * (1/sqrt(l))|学习率随层数的增加而缩小|是|1579 -> 14728|30.83
 3|lr * (1/l)|学习率随层数的增加而缩小|是|1579->6951|29.70
