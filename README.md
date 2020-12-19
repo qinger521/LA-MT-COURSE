@@ -54,7 +54,7 @@ bash train.sh
 
 # 实验结果
 ## 基于门控的encoder-decoder间信息融合 & encoder层内基于attention机制的信息融合
-# | Model |  De -> En |
+#| Model |  De -> En |
 --|--|--
 1|Baseline|35.81
 2|Gate_encoder_decoder|36.75
