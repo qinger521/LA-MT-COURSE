@@ -35,7 +35,7 @@ bash train.sh
 
 # 模型结构
 ## 1、基于门控的encoder-decoder间信息融合
-<img src="img/model1.png">  
+<img src="https://github.com/qinger521/LA-MT-COURSE/tree/master/img/model1.png">  
 其中gate为共享权重的门控单元
 
 - 模型梯度反向传播变为：
