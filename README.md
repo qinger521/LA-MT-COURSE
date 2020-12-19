@@ -9,7 +9,7 @@
 - Python version >= 3.6
 - For training new models, you'll also need an NVIDIA GPU
 # Dataset
-使用iwslt17-de-en数据集
+使用iwslt14-de-en数据集
 
 可通过以下命令获取：  
 ```py 
