@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<!-- saved from url=(0134)file:///C:/Users/Administrator/Desktop/%E4%B8%9C%E5%8C%97%E5%A4%A7%E5%AD%A6%E6%B5%8B%E6%B8%A9%E9%AA%8C%E8%AF%81%E5%B9%B3%E5%8F%B0.html -->
+<html lang="zh-CN">
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    
+    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="NP1uqMa6cg5Uv7f9ihb2mlLJuTz9esAzHGgbQ59S">
+    <title>东北大学测温验证平台</title>
+<link href="https://e-report.neu.edu.cn/css/visitor.css?id=e292e3fdbf052c4098f0" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@5.12.0/css/fontawesome.min.css">
+<link
+    rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@5.12.0/css/brands.min.css">
+<link
+    rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@5.12.0/css/all.min.css">
+    <style>
+        @-webkit-keyframes pulse {
+            50% {
+                -webkit-transform: scale3d(1.2, 1.2, 1.2);
+                transform: scale3d(1.2, 1.2, 1.2);
+            }
+        }
+        @keyframes  pulse {
+            50% {
+                -webkit-transform: scale3d(1.2, 1.2, 1.2);
+                transform: scale3d(1.2, 1.2, 1.2);
+            }
+        }
+        .list-group {
+            padding: 1em;
+        }
+        .list-group-item {
+            font-size: 1.4em;
+            padding: 0.1em;
+            border: 0px;
+        }
+    </style>
+    
+</head>
+<body onload="huoquzhi()">
+<div id="app">
+    <div class="card border-0 text-center" style="color: #006633">
+        <div class="card-body">
+            <h2 class="card-title p-2">东北大学通行验证</h2>
+
+            <div class="animated infinite pulse p-2">
+                <i class="fa fa-arrow-circle-up" style="font-size: 14em;"></i>
+            </div>
+            <!--显示时间-->
+            <p id="now_time" class="card-text p-2" style="font-size: 1.3em;">
+                <!-- 时间：2020-09-15 20:35:04 -->
+            </p>
+        </div>
+    </div>
+
+    <ul class="list-group list-group-flush" style="background-color: #006633">
+        <li class="list-group-item bg-transparent text-white d-flex">
+            <div style="min-width: 4em; text-align-last: justify;">学工号</div>：<div>2001813</div>
+        </li>
+        <li class="list-group-item bg-transparent text-white d-flex">
+            <div style="min-width: 4em; text-align-last: justify;">姓名</div>：<div>王成龙</div>
+        </li>
+        <li class="list-group-item bg-transparent text-white d-flex">
+            <div style="min-width: 4em; text-align-last: justify;">验证位置</div>：<div>浑南校区西门</div>
+            <!--<div id='wheremen'></div>-->
+        </li>
+        <li class="list-group-item bg-transparent text-white d-flex">
+            <div style="min-width: 4em; text-align-last: justify;">进出状态</div>：<div>进入</div>
+        </li>
+            <!--        <li class="list-group-item bg-transparent text-white d-flex">-->
+            <!--    <div style="min-width: 4em; text-align-last: justify;">审核状态</div>：<div>允许入校</div>-->
+            <!--</li>-->
+    </ul>
+</div>
+<script type="text/javascript">
+
+	function getUrlParameter(key) {
+    var reg = new RegExp("(^|&)" + key + "=([^&]*)(&|$)");
+    var r = window.location.search.substr(1).match(reg);
+    if (r != null) {
+        return decodeURI(r[2]);
+    }
+    return null;
+	};
+
+    function nowTime() {//获取当前时间
+        let now= new Date();
+        let _month = ( 10 > (now.getMonth()+1) ) ? '0' + (now.getMonth()+1) : now.getMonth()+1;
+        let _day = ( 10 > now.getDate() ) ? '0' + now.getDate() : now.getDate();
+        let _hour = ( 10 > now.getHours() ) ? '0' + now.getHours() : now.getHours();
+        let _minute = ( 10 > now.getMinutes() ) ? '0' + now.getMinutes() : now.getMinutes();
+        let _second = ( 10 > now.getSeconds() ) ? '0' + now.getSeconds() : now.getSeconds();
+        return now.getFullYear() + '-' + _month + '-' + _day + ' ' + _hour + ':' + _minute + ':' + _second;
+    }
+
+    var ptime = document.getElementById("now_time");
+    console.log(nowTime());
+    var str = "时间："+ nowTime();
+    ptime.innerHTML=str;
+
+
+    function huoquzhi(){
+        var xuehao = getUrlParameter('xuehao');
+        var xingming = getUrlParameter('xingming');
+        var wheremen = getUrlParameter('wheremen');
+        switch(parseInt(wheremen)) {
+		     case 1:
+		        document.getElementById("wheremen").innerHTML="浑南校区东门";
+		        break;
+		     case 2:
+		        document.getElementById("wheremen").innerHTML="浑南校区西门";
+		        break;
+		     case 3:
+		        document.getElementById("wheremen").innerHTML="南湖校区西门";
+		        break;
+		     case 4:
+		     	document.getElementById("wheremen").innerHTML="南湖校区南门";
+		     	break;
+		     case 5:
+		     	document.getElementById("wheremen").innerHTML="浑南校区风雨操场";
+		     	break;
+		     default:
+		    	document.getElementById("wheremen").innerHTML="浑南校区东门";
+		} 
+        document.getElementById("xuehao").innerHTML=xuehao;
+        document.getElementById("xingming").innerHTML=xingming;
+    }
+
+</script>
+
+</body></html>
